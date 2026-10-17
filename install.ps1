@@ -138,10 +138,22 @@ function Get-ReleaseTag {
         return $Wanted
     }
     Say 'Finding the latest release'
-    $headers = @{ 'User-Agent' = 'am-installer' }
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
-    if (-not $release.tag_name) { throw 'the GitHub API did not return a release tag' }
-    return $release.tag_name
+    try {
+        $headers = @{ 'User-Agent' = 'am-installer' }
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
+        if ($release.tag_name) { return $release.tag_name }
+    } catch {
+        # The API is rate limited per IP address, so a 403 here is normal on a
+        # shared connection. The releases feed is not limited at all.
+    }
+    try {
+        $feed = @{ Uri = "https://github.com/$repo/releases.atom" }
+        if ($PSVersionTable.PSVersion.Major -le 5) { $feed.UseBasicParsing = $true }
+        $content = (Invoke-WebRequest @feed).Content
+        $match = [regex]::Match($content, 'releases/tag/([^"]+)')
+        if ($match.Success) { return $match.Groups[1].Value }
+    } catch { }
+    throw 'could not find the latest release; pass -Version v0.1.1, or set AM_INSTALL_BASE_URL to a mirror'
 }
 
 function Invoke-Download {

@@ -135,10 +135,16 @@ fi
 
 if [ "$VERSION" = 'latest' ]; then
     say 'Finding the latest release'
-    tag=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
+    tag=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1)
-    [ -n "$tag" ] || die 'could not read the latest release from the GitHub API; pass --version v0.1.1'
+    if [ -z "$tag" ]; then
+        # The API is rate limited per IP address, which shared connections hit;
+        # the releases feed is not, and it is already ordered newest first.
+        tag=$(fetch "https://github.com/${REPO}/releases.atom" 2>/dev/null \
+            | grep -o 'releases/tag/[^"]*' | head -n 1 | sed 's|releases/tag/||')
+    fi
+    [ -n "$tag" ] || die 'could not find the latest release; pass --version v0.1.1 or set AM_INSTALL_BASE_URL to a mirror'
 else
     tag=$VERSION
     case "$tag" in v*) ;; *) tag="v$tag" ;; esac
