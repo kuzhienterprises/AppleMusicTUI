@@ -79,7 +79,7 @@ func FindMpv() (string, error) {
 		}
 	}
 
-	return "", errors.New("mpv was not found; install it with `winget install mpv-player.mpv-CI.MSVC` or set mpvPath in the config")
+	return "", errors.New("mpv was not found; install it for this system, or set mpvPath in the config")
 }
 
 // StartMpv launches mpv with the given playlist and connects to its IPC

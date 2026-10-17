@@ -53,3 +53,85 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build ./cmd/am
           done
+
+  installer:
+    name: installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # The installer is a user facing path of its own, so keep proving that a
+      # clean machine can fetch the published release and run it. It installs
+      # the latest release, not the commit under test.
+      - name: Install with install.sh
+        if: runner.os != 'Windows'
+        run: sh install.sh --dir "$RUNNER_TEMP/amtest" --no-modify-path
+
+      - name: Run what install.sh installed
+        if: runner.os != 'Windows'
+        run: '"$RUNNER_TEMP/amtest/am" --version'
+
+      - name: install.sh must refuse a tampered download
+        if: runner.os != 'Windows'
+        run: |
+          dry=$(sh install.sh --dry-run --no-modify-path)
+          tag=$(printf '%s\n' "$dry" | awk '$1 == "release" { print $2 }')
+          pkg=$(printf '%s\n' "$dry" | awk '$1 == "asset" { print $2 }')
+          mirror="$RUNNER_TEMP/tampered"
+          mkdir -p "$mirror"
+          cp "$RUNNER_TEMP/amtest/am" "$mirror/$pkg"
+          printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$pkg" > "$mirror/checksums.txt"
+          if AM_INSTALL_BASE_URL="file://$mirror" sh install.sh --version "$tag" --dir "$RUNNER_TEMP/amreject" --no-modify-path; then
+            echo "::error::the installer accepted a download that did not match checksums.txt"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/amreject" || { echo "::error::it installed the tampered archive"; exit 1; }
+          echo "rejected, as it should be"
+
+      - name: Install with install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./install.ps1 -InstallDir "$env:RUNNER_TEMP\amtest" -NoPath
+
+      - name: Run what install.ps1 installed
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP\amtest\am.exe" --version'
+
+      - name: install.ps1 must refuse a tampered download
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) {
+            Write-Host 'python is not available, skipping the tamper check'
+            exit 0
+          }
+          $dry = ./install.ps1 -DryRun -NoPath | Out-String
+          $tag = [regex]::Match($dry, 'release\s+(\S+)').Groups[1].Value
+          $pkg = [regex]::Match($dry, 'asset\s+(\S+)').Groups[1].Value
+          $mirror = Join-Path $env:RUNNER_TEMP 'tampered'
+          New-Item -ItemType Directory -Force $mirror | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\amtest\am.exe" (Join-Path $mirror $pkg)
+          "0000000000000000000000000000000000000000000000000000000000000000  $pkg" |
+            Set-Content -Encoding ascii (Join-Path $mirror 'checksums.txt')
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $mirror -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          try {
+            $env:AM_INSTALL_BASE_URL = 'http://127.0.0.1:8765'
+            ./install.ps1 -Version $tag -InstallDir (Join-Path $env:RUNNER_TEMP 'amreject') -NoPath
+            if ($LASTEXITCODE -eq 0) {
+              throw 'the installer accepted a download that did not match checksums.txt'
+            }
+            if (Test-Path (Join-Path $env:RUNNER_TEMP 'amreject')) {
+              throw 'it installed the tampered archive'
+            }
+            Write-Host 'rejected, as it should be'
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            $global:LASTEXITCODE = 0
+          }

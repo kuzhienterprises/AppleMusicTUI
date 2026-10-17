@@ -16,9 +16,27 @@ A terminal Apple Music client for searching, browsing playlists, and playback.
 
 ## Install
 
+### The installer
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kuzhienterprises/AppleMusicTUI/main/install.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/kuzhienterprises/AppleMusicTUI/main/install.ps1 | iex
+```
+
+Both detect your operating system and CPU, download the matching release, verify it against that release's `checksums.txt`, install it to `~/.local/bin` (macOS and Linux) or `%LOCALAPPDATA%\Programs\am` (Windows), add that directory to your `PATH`, and finish by running `am doctor` to report what is still missing. Neither needs administrator rights, and both are short enough to read before you pipe them.
+
+`-Version v0.1.1` or `--version v0.1.1` pins a release, `--dir` installs elsewhere, and `--uninstall` / `-Uninstall` reverses the install. `-WithMpv` on Windows and `--with-mpv` elsewhere install mpv as well.
+
 ### Prebuilt binaries
 
-Download the latest [release](https://github.com/kuzhienterprises/AppleMusicTUI/releases/latest). Archives are named `am_<version>_<os>_<arch>.zip` for Windows and `am_<version>_<os>_<arch>.tar.gz` for macOS and Linux. Each release includes `checksums.txt`; verify the archive before extracting it and put `am` on your `PATH`.
+Or download the latest [release](https://github.com/kuzhienterprises/AppleMusicTUI/releases/latest) yourself: archives are `am_<version>_<os>_<arch>.zip` for Windows and `am_<version>_<os>_<arch>.tar.gz` for macOS and Linux, and every release ships `checksums.txt` so you can verify the archive before extracting it.
 
 ### With Go
 
@@ -40,7 +58,7 @@ go build -o bin/am ./cmd/am
 
 If you use a coding agent that can run shell commands (Claude Code, Codex, Cursor, ...), paste this in:
 
-> Install `am`, the Apple Music terminal client at https://github.com/kuzhienterprises/AppleMusicTUI. Detect my operating system and CPU architecture. If a recent Go toolchain is available, prefer `go install github.com/kuzhienterprises/AppleMusicTUI/cmd/am@latest`; otherwise download the matching archive from the latest release, verify it against that release's `checksums.txt`, and put `am` on my PATH. Then run `am --version` and `am doctor` and report anything missing, including a Chromium browser or mpv for previews. Never run `am login` or handle my Apple credentials — signing in is my job. Ask me before installing anything else.
+> Install `am`, the Apple Music terminal client at https://github.com/kuzhienterprises/AppleMusicTUI. Run the installer that repository ships for my platform: `install.sh` on macOS and Linux, `install.ps1` on Windows. It detects the operating system and CPU, verifies the download against the release's `checksums.txt`, installs `am` and puts it on my `PATH`. If that fails, fall back to `go install github.com/kuzhienterprises/AppleMusicTUI/cmd/am@latest`, or to the archive for my platform from the latest release, verified against `checksums.txt`. Then run `am --version` and `am doctor` and report anything still missing, including a Chromium browser or mpv for previews. Never run `am login` and never handle my Apple credentials — signing in is my job. Ask before installing anything else.
 
 ## Requirements and playback
 
@@ -124,7 +142,9 @@ Global flags: `--plain` never takes over the terminal, `--engine auto|full|previ
 | Issue | What to check |
 | --- | --- |
 | `am doctor` reports no Chromium browser | Install Chrome or Edge; needed for sign-in and full-length playback. |
-| `am doctor` reports no mpv | Install mpv for 30-second preview playback. |
+| `am doctor` reports no mpv | Install mpv for 30-second preview playback; `am doctor` names the command for your system. |
+| `am: command not found` after installing | Open a new terminal so the `PATH` change takes effect. |
+| macOS refuses to run `am` | Only archives unzipped through a browser carry the quarantine flag: `xattr -d com.apple.quarantine ~/.local/bin/am`. |
 | Full-length playback falls back to previews | Sign in with `am login`; full-length playback requires an active session. |
 | Spectrum unavailable | Real spectrum capture is supported on Windows only. |
 

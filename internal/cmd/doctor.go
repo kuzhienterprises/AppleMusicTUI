@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -100,7 +101,7 @@ func runChecks(ctx context.Context) []checkResult {
 	if mpvPath, err := player.FindMpv(); err != nil {
 		results = append(results, checkResult{
 			"mpv is installed", false,
-			"install with `winget install mpv-player.mpv-CI.MSVC`", true,
+			mpvHint(), true,
 		})
 	} else {
 		results = append(results, checkResult{"mpv is installed", true, mpvVersion(mpvPath), true})
@@ -152,6 +153,29 @@ func mpvVersion(path string) string {
 		return "mpv " + parts[1]
 	}
 	return line
+}
+
+// mpvHint names the package manager that exists on this machine, so the advice
+// printed by `am doctor` is runnable wherever it is read.
+func mpvHint() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "install with `winget install mpv-player.mpv-CI.MSVC`"
+	case "darwin":
+		return "install with `brew install mpv`"
+	default:
+		for _, candidate := range []struct{ binary, hint string }{
+			{"apt", "sudo apt install mpv"},
+			{"dnf", "sudo dnf install mpv"},
+			{"pacman", "sudo pacman -S mpv"},
+			{"zypper", "sudo zypper install mpv"},
+		} {
+			if _, err := exec.LookPath(candidate.binary); err == nil {
+				return "install with `" + candidate.hint + "`"
+			}
+		}
+		return "install it with your distribution's package manager"
+	}
 }
 
 func findBrowserForDoctor() (string, error) {
