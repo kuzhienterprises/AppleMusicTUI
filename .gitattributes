@@ -1,0 +1,9 @@
+# Normalise line endings in the repository so a diff never shows a whole file
+# because of the platform it was edited on.
+* text=auto eol=lf
+
+# Keep the images the README embeds byte for byte.
+*.png binary
+*.gif binary
+*.mp4 binary
+*.ttf binary

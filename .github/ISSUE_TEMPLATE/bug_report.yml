@@ -1,0 +1,77 @@
+name: Bug report
+description: Something does not work — playback, search, the interface, or the install
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Two things speed this up more than anything
+        else: the output of `am doctor`, and saying which engine was in play
+        (`am status` reports it, and `--engine preview` tells you whether the
+        problem is the hidden browser or everything else).
+
+        Please do **not** paste your `config.json`, your music user token, or
+        anything from the browser profile. They are credentials.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I ran `am playlists`, picked a playlist, and the first track stayed on
+        "Initializing" until it gave up with "Apple's player did not finish
+        loading in the browser".
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `am --version`.
+      placeholder: am version 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Playback engine
+      description: Which engine was running when it went wrong?
+      options:
+        - Full-length (the hidden browser)
+        - Previews (mpv)
+        - Not sure
+        - Not about playback
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: am doctor
+      description: Paste the output of `am doctor`. It contains no credentials.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: verbose
+    attributes:
+      label: Verbose output
+      description: The same command again with `--verbose`, if the problem is reproducible.
+      render: text
+    validations:
+      required: false

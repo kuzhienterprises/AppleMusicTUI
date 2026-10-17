@@ -1,0 +1,11 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+
+# A binary built into the working tree by `go build`
+/am
+/am.exe
+
+.DS_Store
