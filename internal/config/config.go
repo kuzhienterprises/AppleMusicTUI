@@ -51,6 +51,9 @@ var (
 	FilePath = filepath.Join(Dir, "config.json")
 	// ProfileDir is the dedicated browser profile used for sign-in.
 	ProfileDir = filepath.Join(Dir, "browser-profile")
+	// DaemonFile is where a running player daemon publishes the port its
+	// browser is listening on, so another command can attach to it.
+	DaemonFile = filepath.Join(Dir, "daemon.json")
 )
 
 // Load reads the settings file, returning a zero Config when absent.

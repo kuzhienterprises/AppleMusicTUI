@@ -18,6 +18,8 @@ var (
 	flagPlain      bool
 	flagStorefront string
 	flagEngine     string
+	flagHeadless   bool
+	flagNoDaemon   bool
 )
 
 // version is what `am --version` reports. It is a variable rather than a
@@ -88,6 +90,8 @@ sessions fall back to Apple's 30 second preview clips, which play through mpv.`,
 	root.PersistentFlags().BoolVar(&flagPlain, "plain", false, "never take over the terminal; print instead")
 	root.PersistentFlags().StringVar(&flagStorefront, "storefront", "", "storefront country code, e.g. us or in")
 	root.PersistentFlags().StringVar(&flagEngine, "engine", "auto", "playback engine: auto, full or preview")
+	root.PersistentFlags().BoolVar(&flagHeadless, "headless", false, "play in a headless browser, with no window at all")
+	root.PersistentFlags().BoolVar(&flagNoDaemon, "no-daemon", false, "never keep a player warm between commands")
 
 	root.AddCommand(
 		newLoginCommand(),
@@ -98,6 +102,7 @@ sessions fall back to Apple's 30 second preview clips, which play through mpv.`,
 		newPlayCommand(),
 		newPlaylistsCommand(),
 		newPlaylistCommand(),
+		newDaemonCommand(),
 	)
 	return root
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/auth"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/config"
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/player"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/ui"
 )
 
@@ -26,12 +27,25 @@ browsing is never touched.`,
 				return loginWithToken(ctx, manualToken)
 			}
 
+			// A daemon holds the browser profile, and Chrome will not open
+			// a second instance with the same profile, so the warm player
+			// has to step aside before the sign-in browser starts.
+			if err := player.StopDaemon(); err != nil {
+				ui.Debug("no player daemon to stop: %v", err)
+			}
+
 			result, err := auth.Login(ctx)
 			if err != nil {
 				return err
 			}
 			ui.OK("Signed in (storefront: %s)", result.Storefront)
 			ui.Info("  credentials saved to %s", config.FilePath)
+
+			// Warm the player in the background, so the first song does
+			// not have to wait for a browser to start.
+			if !flagNoDaemon {
+				player.WarmDaemon(player.BrowserOptions{Headless: flagHeadless})
+			}
 			return nil
 		},
 	}

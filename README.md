@@ -72,6 +72,7 @@ The real spectrum is Windows-only: WASAPI loopback captures system audio and an 
 ✓ settings directory is writable — <config directory>
 ✓ developer token can be obtained — valid until <date>
 ✓ signed in to Apple Music — storefront <code>
+✓ player daemon — running and warm (pid <pid>, port <port>)
 ✓ mpv is installed — mpv <version>
 ✓ a Chromium browser is available — <browser path>
 ✓ interactive terminal detected — full-screen interface will be used
@@ -92,9 +93,28 @@ am playlist "Late Night"
 am status
 ```
 
-`login` opens a browser for you to sign in. The app commands are `doctor`, `login`, `status`, `search`, `playlists`, `playlist`, and `play`.
+`login` opens a browser for you to sign in. The app commands are `doctor`, `login`, `status`, `search`, `playlists`, `playlist`, and `play`, plus `daemon` for the warm player described below.
 
-Global flags: `--plain` never takes over the terminal, `--engine auto|full|preview` chooses how playback runs, `--storefront us` pins a storefront, `--verbose` adds diagnostic detail, and `--json` prints machine-readable output on `search`, `playlists` and `status`.
+Global flags: `--plain` never takes over the terminal, `--engine auto|full|preview` chooses how playback runs, `--headless` runs the playback browser with no window at all instead of parking one off-screen, `--no-daemon` never keeps a player warm between commands, `--storefront us` pins a storefront, `--verbose` adds diagnostic detail, and `--json` prints machine-readable output on `search`, `playlists` and `status`.
+
+## The warm player
+
+Starting the browser is the slow part of playing a track. Chrome takes a few seconds to open its debugger, Apple's page takes a few more to load, and the decryption handshake takes a few more after that — and none of that work depends on what you asked to play. So `am` does it once and keeps the result.
+
+After the first command, a small background process keeps the browser alive with the player page loaded. The next command attaches to that page instead of starting from scratch, and the first sound arrives in a couple of seconds rather than twenty. The background player is still Apple's own web player doing Apple's own DRM; nothing about what plays changes, only how long you wait for it.
+
+It stops itself after fifteen minutes of not being used. `am daemon --stop` stops it now, `am daemon` starts it in the foreground if you want it warm before you do anything else, and `--no-daemon` turns it off and starts a fresh browser every time.
+
+```sh
+am daemon            # keep a warm player in the foreground
+am daemon --stop     # stop the background one
+```
+
+`am --verbose` prints where the time went, which is the quickest way to see what is slow on your machine:
+
+```text
+browser boot: process 3.8s, page target 100ms, MusicKit 5.4s, queue 2.2s, first sound 20.2s (page: DOM 1.8s, load 2.4s)
+```
 
 ## Controls
 
@@ -150,7 +170,7 @@ Global flags: `--plain` never takes over the terminal, `--engine auto|full|previ
 
 ## How it works
 
-A Chromium page is started off-screen and never shown. `am` talks to it over the DevTools protocol, and MusicKit in that page does the catalogue queries and plays full-length tracks through Apple's own player; the terminal is the remote control. Signed out, previews are played by mpv over an IPC socket, with no browser at all. The spectrum reads the system's audio output through WASAPI loopback on Windows and is reported as unavailable elsewhere.
+A Chromium page is started off-screen and never shown; `--headless` skips the window entirely. `am` talks to it over the DevTools protocol, and MusicKit in that page does the catalogue queries and plays full-length tracks through Apple's own player; the terminal is the remote control. A background daemon keeps that page loaded between commands, so the browser is started once rather than once per song. Signed out, previews are played by mpv over an IPC socket, with no browser at all. The spectrum reads the system's audio output through WASAPI loopback on Windows and is reported as unavailable elsewhere.
 
 ## Legal
 

@@ -124,7 +124,11 @@ func startEngine(ctx context.Context, tracks []player.Track, startIndex int, ful
 		return player.StartMpvEngine(tracks, startIndex, idle)
 	}
 
-	engine, err := player.StartBrowserEngine(ctx, tracks, player.BrowserOptions{})
+	engine, err := player.StartBrowserEngine(ctx, tracks, player.BrowserOptions{
+		Headless:   flagHeadless,
+		NoDaemon:   flagNoDaemon,
+		StartIndex: startIndex,
+	})
 	if err != nil {
 		return nil, err
 	}

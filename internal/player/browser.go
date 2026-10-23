@@ -43,6 +43,42 @@ var browserReadyTimeout = func() time.Duration {
 	return 90 * time.Second
 }()
 
+// BootTimings is how long the browser took to come up, phase by phase.
+//
+// It exists because "the browser is slow" is not a diagnosis. The phases are
+// very different problems: a slow process spawn is a disk or antivirus
+// problem, a slow page load is Apple's site bundle, and a slow MusicKit is a
+// stalled script. Only the measurements say which one it was.
+type BootTimings struct {
+	// Process is from spawning the browser to its debugger answering.
+	Process time.Duration
+	// Target is from the debugger answering to the Apple Music page existing.
+	Target time.Duration
+	// MusicKit is from the page existing to MusicKit being usable.
+	MusicKit time.Duration
+	// Queue is how long handing the tracks to MusicKit took.
+	Queue time.Duration
+	// FirstPlay is from the launch to the first sound.
+	FirstPlay time.Duration
+	// DOMReady and PageLoad are the page's own numbers, as the browser
+	// measured them: when the HTML had been parsed, and when the load event
+	// fired.
+	DOMReady time.Duration
+	PageLoad time.Duration
+}
+
+// String renders the timings as one line, slowest phase first.
+func (b BootTimings) String() string {
+	return fmt.Sprintf("browser boot: process %s, page target %s, MusicKit %s, queue %s, first sound %s (page: DOM %s, load %s)",
+		b.Process.Round(100*time.Millisecond),
+		b.Target.Round(100*time.Millisecond),
+		b.MusicKit.Round(100*time.Millisecond),
+		b.Queue.Round(100*time.Millisecond),
+		b.FirstPlay.Round(100*time.Millisecond),
+		b.DOMReady.Round(100*time.Millisecond),
+		b.PageLoad.Round(100*time.Millisecond))
+}
+
 // BrowserEngine plays full-length tracks by driving Apple's own web player
 // inside a browser window that is parked off-screen.
 //
@@ -55,6 +91,24 @@ type BrowserEngine struct {
 	cmd    *exec.Cmd
 	exited chan struct{}
 	client *cdp.Client
+
+	// headless records how this browser was launched, so a boot failure can
+	// say whether the mode itself is the likely cause.
+	headless bool
+
+	// timings holds how long each phase of the boot took.
+	timings BootTimings
+
+	// launchedAt is when the browser process was spawned, which is the zero
+	// point every boot measurement is counted from.
+	launchedAt time.Time
+
+	// ownsBrowser is false when the browser belongs to a daemon: the engine
+	// may drive it, but it must never close it.
+	ownsBrowser bool
+
+	// startIndex is the queue position playback begins at.
+	startIndex int
 
 	warned bool
 	closed bool
@@ -71,19 +125,38 @@ type BrowserOptions struct {
 	// ShowWindow keeps the window on screen. The default is to park it far
 	// off-screen so playback stays invisible.
 	ShowWindow bool
+	// Headless runs Chrome's new headless mode, which draws nothing at all:
+	// there is no window, not even one placed off-screen. It is opt-in rather
+	// than the default, because headless depends on the Chrome build for both
+	// its audio output and its DRM path, while an off-screen window uses the
+	// ordinary renderer, audio and Widevine pipelines. `am play --headless`
+	// selects it.
+	Headless bool
+	// Port is the debugging port to use. Zero picks a free one; a daemon
+	// fixes its port so that clients can find the browser again.
+	Port int
+	// NoDaemon keeps the engine from using or starting a player daemon, and
+	// makes it start a browser of its own every time.
+	NoDaemon bool
+	// StartIndex is the queue position playback begins at. It matters for
+	// one thing: the media pipeline is only warmed up early when the first
+	// track is the one that is going to play.
+	StartIndex int
 }
 
-// StartBrowserEngine launches the hidden browser, waits for Apple's web player
-// to boot, and queues the given tracks. Playback does not begin until Play is
-// called.
-func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions) (*BrowserEngine, error) {
-	if len(tracks) == 0 {
-		return nil, errors.New("nothing to play")
-	}
+// browserLaunch is a browser that has been asked to start.
+type browserLaunch struct {
+	cmd      *exec.Cmd
+	endpoint string
+}
 
+// launchBrowser starts the browser on Apple's player page. It waits for
+// nothing: the daemon and the engine want different things from "ready", and
+// both of them have to measure it themselves.
+func launchBrowser(opts BrowserOptions) (browserLaunch, error) {
 	browserPath, err := auth.FindBrowser()
 	if err != nil {
-		return nil, err
+		return browserLaunch{}, err
 	}
 
 	storefront := config.Load().Storefront
@@ -91,13 +164,22 @@ func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions
 		storefront = "us"
 	}
 
-	port, err := freeTCPPort()
-	if err != nil {
-		return nil, err
+	port := opts.Port
+	if port == 0 {
+		port, err = freeTCPPort()
+		if err != nil {
+			return browserLaunch{}, err
+		}
 	}
 
+	// How the window is hidden. The off-screen window is the default because
+	// it uses the ordinary renderer, audio and DRM paths; --headless=new
+	// draws nothing at all, including no window to park.
 	window := []string{"--window-size=400,300", "--window-position=-32000,-32000"}
-	if opts.ShowWindow {
+	switch {
+	case opts.Headless:
+		window = []string{"--headless=new"}
+	case opts.ShowWindow:
 		window = []string{"--window-size=900,700", "--window-position=0,0"}
 	}
 
@@ -119,17 +201,134 @@ func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions
 	cmd := exec.Command(browserPath, args...)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting the browser: %w", err)
+		return browserLaunch{}, fmt.Errorf("starting the browser: %w", err)
+	}
+	return browserLaunch{cmd: cmd, endpoint: "http://127.0.0.1:" + strconv.Itoa(port)}, nil
+}
+
+// attached is a player page that is ready to be driven.
+type attached struct {
+	client *cdp.Client
+	// pageURL is the page's debugger URL, which a daemon publishes so that
+	// clients can connect without looking for the page first.
+	pageURL string
+	timings BootTimings
+}
+
+// attachPage finds the player page, connects to it and waits until MusicKit
+// is usable.
+func attachPage(ctx context.Context, endpoint string, launched time.Time) (attached, error) {
+	var out attached
+
+	if err := waitForEndpoint(ctx, endpoint, browserReadyTimeout); err != nil {
+		return out, err
+	}
+	out.timings.Process = time.Since(launched)
+
+	pageURL, err := musicPageTarget(ctx, endpoint)
+	if err != nil {
+		return out, err
+	}
+	out.timings.Target = time.Since(launched) - out.timings.Process
+
+	client, err := cdp.Dial(ctx, pageURL)
+	if err != nil {
+		return out, err
+	}
+	waited, err := waitForMusicKit(ctx, client, launched)
+	if err != nil {
+		_ = client.Close()
+		return out, err
+	}
+	out.client = client
+	out.pageURL = pageURL
+	out.timings.MusicKit = waited - out.timings.Process - out.timings.Target
+	return out, nil
+}
+
+// attachKnownPage connects to a page whose debugger URL is already known,
+// which is what a client does when it attaches to a daemon.
+func attachKnownPage(ctx context.Context, pageURL string, launched time.Time) (attached, error) {
+	var out attached
+
+	client, err := cdp.Dial(ctx, pageURL)
+	if err != nil {
+		return out, err
+	}
+	waited, err := waitForMusicKit(ctx, client, launched)
+	if err != nil {
+		_ = client.Close()
+		return out, err
+	}
+	out.client = client
+	out.pageURL = pageURL
+	out.timings.MusicKit = waited
+	return out, nil
+}
+
+// waitForMusicKit waits until MusicKit is usable in a page that is already
+// connected, and reports how long that took.
+func waitForMusicKit(ctx context.Context, client *cdp.Client, launched time.Time) (time.Duration, error) {
+	deadline := time.Now().Add(browserReadyTimeout)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		ready, err := client.EvaluateBool(ctx, `typeof window.MusicKit !== 'undefined' && !!window.MusicKit.getInstance()`)
+		if err == nil && ready {
+			return time.Since(launched), nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return 0, errors.New("Apple's player did not finish loading in the browser")
+}
+
+// StartBrowserEngine launches the hidden browser, waits for Apple's web player
+// to boot, and queues the given tracks. Playback does not begin until Play is
+// called.
+func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions) (*BrowserEngine, error) {
+	if len(tracks) == 0 {
+		return nil, errors.New("nothing to play")
 	}
 
-	engine := &BrowserEngine{cmd: cmd, exited: make(chan struct{}), tracks: tracks}
+	// A warm player is worth a great deal: the browser is already running
+	// with Apple's page loaded, so a queue can be handed over immediately
+	// instead of paying the whole boot again.
+	if !opts.NoDaemon {
+		if client, state, ok := attachDaemon(ctx); ok {
+			return newAttachedEngine(ctx, client, state, tracks, opts)
+		}
+		// Nothing is running, so start one. It costs what starting a
+		// browser here would have cost, and it keeps the player warm for
+		// every command after this one.
+		if _, err := spawnDaemon(ctx, opts); err != nil {
+			ui.Debug("no background player: %v", err)
+		} else if client, state, ok := attachDaemon(ctx); ok {
+			return newAttachedEngine(ctx, client, state, tracks, opts)
+		}
+	}
+
+	launched := time.Now()
+	launch, err := launchBrowser(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	engine := &BrowserEngine{
+		cmd:         launch.cmd,
+		exited:      make(chan struct{}),
+		tracks:      tracks,
+		headless:    opts.Headless,
+		launchedAt:  launched,
+		ownsBrowser: true,
+		startIndex:  opts.StartIndex,
+	}
 	go func() {
-		_ = cmd.Wait()
+		_ = launch.cmd.Wait()
 		close(engine.exited)
 	}()
 
-	endpoint := "http://127.0.0.1:" + strconv.Itoa(port)
-	if err := engine.connect(ctx, endpoint); err != nil {
+	if err := engine.connect(ctx, launch.endpoint, launched); err != nil {
 		_ = engine.Close()
 		return nil, err
 	}
@@ -137,55 +336,117 @@ func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions
 		_ = engine.Close()
 		return nil, err
 	}
+	engine.timings.Queue = time.Since(launched) - engine.timings.Process - engine.timings.Target - engine.timings.MusicKit
+	ui.Debug("%s", engine.timings)
 	return engine, nil
+}
+
+// newAttachedEngine builds an engine around a daemon's player page. The
+// browser belongs to the daemon, so this engine must never close it: it
+// pauses the player and lets go of it when it is done.
+func newAttachedEngine(ctx context.Context, client *cdp.Client, state DaemonState, tracks []Track, opts BrowserOptions) (*BrowserEngine, error) {
+	launched := time.Now()
+	engine := &BrowserEngine{
+		client:     client,
+		exited:     make(chan struct{}),
+		tracks:     tracks,
+		headless:   opts.Headless,
+		launchedAt: launched,
+		startIndex: opts.StartIndex,
+	}
+	engine.prepare(ctx)
+	engine.timings.MusicKit = time.Since(launched)
+	if err := engine.queue(ctx); err != nil {
+		_ = engine.Close()
+		return nil, err
+	}
+	engine.timings.Queue = time.Since(launched) - engine.timings.MusicKit
+	ui.Debug("attached to the warm player in %s", time.Since(launched).Round(100*time.Millisecond))
+	return engine, nil
+}
+
+// headlessHint explains a boot failure that headless mode is known to cause.
+// DRM inside headless Chrome needs version 112 or newer, and asking an older
+// build for it fails before anything reaches the screen, so the error is the
+// only place the reason can appear.
+func (e *BrowserEngine) headlessHint(err error) error {
+	if !e.headless {
+		return err
+	}
+	return fmt.Errorf("%w: --headless needs Chrome or Edge 112 or newer, and without the flag the window is parked off-screen instead", err)
 }
 
 // connect waits for the debugger, attaches to the Apple Music page and waits
 // for MusicKit to become available.
-func (e *BrowserEngine) connect(ctx context.Context, endpoint string) error {
-	if err := waitForEndpoint(ctx, endpoint, browserReadyTimeout); err != nil {
-		return err
-	}
-
-	wsURL, err := musicPageTarget(ctx, endpoint)
+func (e *BrowserEngine) connect(ctx context.Context, endpoint string, launched time.Time) error {
+	page, err := attachPage(ctx, endpoint, launched)
 	if err != nil {
-		return err
+		return e.headlessHint(err)
 	}
-	client, err := cdp.Dial(ctx, wsURL)
-	if err != nil {
-		return err
-	}
-	e.client = client
+	e.client = page.client
+	e.timings = page.timings
+	e.prepare(ctx)
+	return nil
+}
 
-	// The window sits off-screen, and Chrome throttles occluded pages hard
-	// enough to stall audio and interrupt the DRM handshake. Bringing the
-	// page to the front and emulating focus keeps the renderer running at
-	// full speed without showing anything.
-	_ = client.Call(ctx, "Page.bringToFront", nil, nil)
-	if err := client.Call(ctx, "Emulation.setFocusEmulationEnabled", map[string]any{"enabled": true}, nil); err != nil {
+// prepare does what a player needs once its page is there: keeping the
+// renderer awake, and making sure the volume is not a surprise.
+func (e *BrowserEngine) prepare(ctx context.Context) {
+	// An off-screen window is an occluded page, and Chrome throttles occluded
+	// pages hard enough to stall audio and interrupt the DRM handshake.
+	// Bringing the page to the front and emulating focus keeps the renderer
+	// running at full speed without showing anything. A headless page is
+	// visible to Chrome already, so both calls are no-ops there; they stay so
+	// there is one code path rather than two.
+	_ = e.client.Call(ctx, "Page.bringToFront", nil, nil)
+	if err := e.client.Call(ctx, "Emulation.setFocusEmulationEnabled", map[string]any{"enabled": true}, nil); err != nil {
 		ui.Debug("focus emulation unavailable: %v", err)
 	}
 
-	deadline := time.Now().Add(browserReadyTimeout)
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		ready, err := client.EvaluateBool(ctx, `typeof window.MusicKit !== 'undefined' && !!window.MusicKit.getInstance()`)
-		if err == nil && ready {
-			// MusicKit remembers its volume between sessions, and this
-			// profile exists only for this CLI. Start at full volume so
-			// playback is never mysteriously quiet.
-			_ = client.Evaluate(ctx, `(() => {
+	// MusicKit remembers its volume between sessions, and this profile
+	// exists only for this CLI. Start at full volume so playback is never
+	// mysteriously quiet.
+	_ = e.client.Evaluate(ctx, `(() => {
   const mk = window.MusicKit.getInstance();
   if (mk) mk.volume = 1;
   return true;
 })()`, nil)
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
+
+	e.readPageTimings(ctx)
+}
+
+// readPageTimings asks the page how long its own load took. The numbers come
+// from the browser rather than from this process, so they separate "the
+// network was slow" from "the page was heavy".
+func (e *BrowserEngine) readPageTimings(ctx context.Context) {
+	var raw struct {
+		DOMReady float64 `json:"domReady"`
+		PageLoad float64 `json:"pageLoad"`
 	}
-	return errors.New("Apple's player did not finish loading in the browser")
+	const script = `(() => {
+  try {
+    const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    if (nav) {
+      return {
+        domReady: nav.domContentLoadedEventEnd || 0,
+        pageLoad: nav.loadEventEnd || 0,
+      };
+    }
+    const t = performance.timing;
+    return {
+      domReady: (t.domContentLoadedEventEnd || 0) - t.navigationStart,
+      pageLoad: (t.loadEventEnd || 0) - t.navigationStart,
+    };
+  } catch (err) {
+    return { domReady: 0, pageLoad: 0 };
+  }
+})()`
+	if err := e.client.Evaluate(ctx, script, &raw); err != nil {
+		ui.Debug("could not read the page's own timings: %v", err)
+		return
+	}
+	e.timings.DOMReady = time.Duration(raw.DOMReady * float64(time.Millisecond))
+	e.timings.PageLoad = time.Duration(raw.PageLoad * float64(time.Millisecond))
 }
 
 // queueOutcome reads back whatever queue operation ran last. Every MusicKit
@@ -258,10 +519,17 @@ func (e *BrowserEngine) queue(ctx context.Context) error {
   const mk = window.MusicKit.getInstance();
   window.__am = { ok: false, error: null };
   mk.setQueue({ songs: %s })
-    .then(() => { window.__am.ok = true; })
+    .then(() => {
+      window.__am.ok = true;
+      // Start playing the moment the queue lands, rather than waiting for
+      // this process to notice and tell the page to play. The licence
+      // request and the decoder warm-up then overlap with the confirmation
+      // round trip instead of following it.
+      if (%v) { try { mk.play(); } catch (err) {} }
+    })
     .catch((err) => { window.__am.error = String((err && err.message) || err); });
   return true;
-})()`, encoded)
+})()`, encoded, e.startIndex == 0)
 	if err := e.client.Evaluate(ctx, script, nil); err != nil {
 		return fmt.Errorf("queueing tracks in the browser: %w", err)
 	}
@@ -371,6 +639,8 @@ func (e *BrowserEngine) Play(ctx context.Context, index int) error {
 			return err
 		}
 		if started {
+			e.timings.FirstPlay = time.Since(e.launchedAt)
+			ui.Debug("%s", e.timings)
 			return nil
 		}
 		ui.Debug("playback has not started yet; retrying")
@@ -518,6 +788,10 @@ func (e *BrowserEngine) Status(ctx context.Context) (Status, error) {
 }
 
 // Close shuts the browser down, taking its renderer processes with it.
+//
+// A browser belonging to a daemon is left running: the engine pauses the
+// player and lets go of it, and the daemon keeps the page warm for the next
+// command.
 func (e *BrowserEngine) Close() error {
 	if e.closed {
 		return nil
@@ -525,6 +799,20 @@ func (e *BrowserEngine) Close() error {
 	e.closed = true
 
 	if e.client != nil {
+		if !e.ownsBrowser {
+			// Stop the music, but keep the page.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = e.client.Evaluate(ctx, `(() => {
+  const mk = window.MusicKit && window.MusicKit.getInstance();
+  if (mk && mk.isPlaying) mk.pause();
+  return true;
+})()`, nil)
+			cancel()
+			_ = e.client.Close()
+			releaseDaemon()
+			return nil
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = e.client.Call(ctx, "Browser.close", nil, nil)
 		cancel()

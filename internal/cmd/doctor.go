@@ -82,6 +82,16 @@ func runChecks(ctx context.Context) []checkResult {
 		})
 	}
 
+	// Warm player
+	if detail, running := player.DaemonStatus(); running {
+		results = append(results, checkResult{"player daemon", true, detail, false})
+	} else {
+		results = append(results, checkResult{
+			"player daemon", true,
+			"not running — the next command will start one", false,
+		})
+	}
+
 	// Session
 	if cfg.MusicUserToken == "" {
 		results = append(results, checkResult{
