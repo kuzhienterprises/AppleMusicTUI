@@ -295,16 +295,22 @@ func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions
 	// with Apple's page loaded, so a queue can be handed over immediately
 	// instead of paying the whole boot again.
 	if !opts.NoDaemon {
-		if client, state, ok := attachDaemon(ctx); ok {
-			return newAttachedEngine(ctx, client, state, tracks, opts)
+		engine, err := warmEngine(ctx, tracks, opts)
+		if err != nil {
+			return nil, err
 		}
-		// Nothing is running, so start one. It costs what starting a
-		// browser here would have cost, and it keeps the player warm for
-		// every command after this one.
-		if _, err := spawnDaemon(ctx, opts); err != nil {
-			ui.Debug("no background player: %v", err)
-		} else if client, state, ok := attachDaemon(ctx); ok {
-			return newAttachedEngine(ctx, client, state, tracks, opts)
+		if engine == nil {
+			// Nothing is running, so start one. It costs what starting a
+			// browser here would have cost, and it keeps the player warm for
+			// every command after this one.
+			if _, err := spawnDaemon(ctx, opts); err != nil {
+				ui.Debug("no background player: %v", err)
+			} else if engine, err = warmEngine(ctx, tracks, opts); err != nil {
+				return nil, err
+			}
+		}
+		if engine != nil {
+			return engine, nil
 		}
 	}
 
@@ -339,6 +345,57 @@ func StartBrowserEngine(ctx context.Context, tracks []Track, opts BrowserOptions
 	engine.timings.Queue = time.Since(launched) - engine.timings.Process - engine.timings.Target - engine.timings.MusicKit
 	ui.Debug("%s", engine.timings)
 	return engine, nil
+}
+
+// warmEngine hands the queue to the daemon's player, if there is one.
+//
+// It returns no engine and no error when there is nothing to attach to, and
+// the caller then starts a browser. That is the whole point of the warm
+// player: it is an optimisation, so a page that has gone away since it was
+// last used must cost a fresh boot, not the command.
+func warmEngine(ctx context.Context, tracks []Track, opts BrowserOptions) (*BrowserEngine, error) {
+	client, state, ok := attachDaemon(ctx)
+	if !ok {
+		return nil, nil
+	}
+
+	engine, err := newAttachedEngine(ctx, client, state, tracks, opts)
+	if err == nil {
+		return engine, nil
+	}
+	if !errors.Is(err, cdp.ErrGone) {
+		// The browser answered, and what it said would be the same from a cold
+		// one: a bad track, a refused queue. Starting over would only be slower.
+		return nil, err
+	}
+
+	// The page died between being warm and being asked to play. A daemon
+	// holding a dead page is worth nothing, and it is holding the profile
+	// directory the next browser needs, so it is retired first.
+	ui.Debug("the warm player went away: %v", err)
+	if err := StopDaemon(); err != nil {
+		ui.Debug("could not stop the daemon holding it: %v", err)
+	}
+	waitForBrowserExit(ctx, state.Port, daemonExitTimeout)
+	return nil, nil
+}
+
+// waitForBrowserExit waits for a daemon's browser to stop answering. The
+// daemon removes its state file and then kills the browser, so the profile is
+// not free the moment the daemon has been asked to go.
+func waitForBrowserExit(ctx context.Context, port int, timeout time.Duration) {
+	endpoint := "http://127.0.0.1:" + strconv.Itoa(port)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if port == 0 || !debuggerAnswers(endpoint) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // newAttachedEngine builds an engine around a daemon's player page. The

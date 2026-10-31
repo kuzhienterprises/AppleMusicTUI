@@ -105,6 +105,8 @@ After the first command, a small background process keeps the browser alive with
 
 It stops itself after fifteen minutes of not being used. `am daemon --stop` stops it now, `am daemon` starts it in the foreground if you want it warm before you do anything else, and `--no-daemon` turns it off and starts a fresh browser every time.
 
+The warm player is a shortcut, never a dependency: if the browser behind it has gone away, `am` starts a fresh one rather than failing the command.
+
 ```sh
 am daemon            # keep a warm player in the foreground
 am daemon --stop     # stop the background one

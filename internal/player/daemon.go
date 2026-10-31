@@ -45,6 +45,11 @@ const (
 	// honoured. It only matters when a client was killed without releasing
 	// the lock, which would otherwise block the player forever.
 	daemonLockTimeout = 30 * time.Minute
+
+	// daemonExitTimeout is how long a client waits for a daemon that is being
+	// retired to let go of its browser. The profile directory is only free
+	// once the browser is gone, not when the daemon is asked to stop.
+	daemonExitTimeout = 5 * time.Second
 )
 
 // DaemonState is the handshake between a daemon and the clients that find it.

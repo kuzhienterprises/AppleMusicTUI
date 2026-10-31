@@ -5,9 +5,15 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Client is a single WebSocket connection to one browser target.
@@ -32,6 +38,41 @@ func NewClient(conn wsConn) *Client { return &Client{conn: conn} }
 // Close closes the underlying connection.
 func (c *Client) Close() error { return c.conn.Close() }
 
+// ErrGone reports that the browser closed the connection: it crashed, was
+// killed, or its page went away. The transport error underneath is kept
+// because that is what a bug report needs, but on its own it says nothing a
+// person can act on.
+var ErrGone = errors.New("the player browser went away")
+
+// closedConnection reports whether a read failed because the socket went away
+// rather than because the command did. Gorilla hands back the transport error
+// itself for a reset connection, an unexpected EOF for a truncated frame, and
+// a CloseError when the browser closes the socket politely.
+func closedConnection(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	var closed *websocket.CloseError
+	if errors.As(err, &closed) {
+		return true
+	}
+
+	// Windows says "An existing connection was forcibly closed by the remote
+	// host", which matches nothing above. A timeout is deliberately not in
+	// this list: a browser that is slow is not a browser that is gone.
+	text := strings.ToLower(err.Error())
+	for _, phrase := range []string{"forcibly closed", "connection reset", "broken pipe", "use of closed network connection"} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // Call sends a protocol command and decodes the reply into out.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	c.mu.Lock()
@@ -44,6 +85,9 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 		payload["params"] = params
 	}
 	if err := c.conn.WriteJSON(payload); err != nil {
+		if closedConnection(err) {
+			return fmt.Errorf("%w while sending %s (%v)", ErrGone, method, err)
+		}
 		return fmt.Errorf("sending %s: %w", method, err)
 	}
 
@@ -63,6 +107,9 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
+			if closedConnection(err) {
+				return fmt.Errorf("%w while waiting for %s (%v)", ErrGone, method, err)
+			}
 			return fmt.Errorf("reading the reply to %s: %w", method, err)
 		}
 
