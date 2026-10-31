@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/artwork"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/lyrics"
@@ -380,7 +381,10 @@ func (m playerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
+		// A window that grew or shrank leaves the old frame's borders behind
+		// if the renderer only repaints the rows the new card happens to use.
+		// Clear once on resize so the first frame at the new size is clean.
+		return m, tea.ClearScreen
 
 	case stopTimerMsg:
 		return m, tea.Quit
@@ -591,21 +595,25 @@ func (m playerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y":
 		m.showLyrics = !m.showLyrics
 		m.showHelp = false
+		// The lyrics panel changes the card's height, and on some terminals
+		// the rows the old panel occupied survive the repaint. Clear once so
+		// opening or closing the words never leaves half a frame behind.
+		clear := tea.ClearScreen
 		if !m.showLyrics {
-			return m, nil
+			return m, clear
 		}
 		if m.lyricist == nil {
 			m.lyricsErr = fmt.Errorf("lyrics are not available here")
-			return m, nil
+			return m, clear
 		}
 		// Opening the panel is also how a failed lookup is retried: the track
 		// has not changed, but the reason for the empty panel may have.
 		if track := m.currentTrack(); track.ID != m.lyricsTrack || m.lyricsErr != nil {
 			m.lyricsLoading = true
 			m.lyricsErr = nil
-			return m, m.lyricsCommand()
+			return m, tea.Batch(clear, m.lyricsCommand())
 		}
-		return m, nil
+		return m, clear
 
 	case "v":
 		m.showSpectrum = !m.showSpectrum
@@ -759,9 +767,27 @@ func (m playerModel) View() string {
 		}
 	}
 
-	// Even the leanest card is too tall. Draw it anyway: the terminal will
-	// scroll, but a clipped player beats no player.
-	return m.centre(m.card(content, layouts[len(layouts)-1]))
+	// Even the leanest card is too tall. Draw it anyway, but never let the
+	// string itself scroll the alternate screen: a frame taller than the
+	// window leaves the previous one above it and turns every tick into a
+	// duplicate.
+	card := m.card(content, layouts[len(layouts)-1])
+	if m.height > 0 {
+		card = trimToHeight(card, m.height)
+	}
+	return m.centre(card)
+}
+
+// trimToHeight cuts a rendered block down to the terminal height.
+func trimToHeight(block string, height int) string {
+	if height <= 0 {
+		return block
+	}
+	lines := strings.Split(block, "\n")
+	if len(lines) <= height {
+		return block
+	}
+	return strings.Join(lines[:height], "\n")
 }
 
 // fitsHeight reports whether a rendered block leaves room inside a window of
@@ -796,7 +822,7 @@ func (m playerModel) card(content int, l layout) string {
 
 	lines = append(lines, m.headerLine(content))
 	gap()
-	lines = append(lines, m.bodyLines(content, l.cover)...)
+	lines = append(lines, m.bodyLines(content, l)...)
 	gap()
 	lines = append(lines, m.progressLine(content))
 
@@ -919,10 +945,10 @@ func (m playerModel) volumeWidget() string {
 
 // bodyLines is the two-column middle of the card: cover on the left, and the
 // track details with the spectrum on the right.
-func (m playerModel) bodyLines(content int, cover bool) []string {
-	column := m.bodyColumn(content, cover)
+func (m playerModel) bodyLines(content int, l layout) []string {
+	column := m.bodyColumn(content, l.cover, m.bodyRows(l))
 
-	if !cover || !m.hasArt(content) {
+	if !l.cover || !m.hasArt(content) {
 		return column
 	}
 
@@ -946,27 +972,38 @@ func (m playerModel) bodyLines(content int, cover bool) []string {
 // search panel while one is open. Swapping it in place of the details is what
 // keeps the card the same size, so opening the search never shunts the frame
 // sideways.
-func (m playerModel) bodyColumn(content int, cover bool) []string {
+func (m playerModel) bodyColumn(content int, cover bool, rows int) []string {
 	width := m.textWidth(content, cover)
 	if m.search.open {
-		return m.searchLines(width, m.bodyRows())
+		return m.searchLines(width, rows)
 	}
 	if m.showLyrics {
-		return m.lyricsLines(width, m.bodyRows())
+		return m.lyricsLines(width, rows)
 	}
 	return m.metaLines(width)
 }
 
-// bodyRows is the height the search panel is drawn against. The cover's height
+// bodyRows is the height the body panel is drawn against. The cover's height
 // is the natural target, but a short window wins: the panel is worth less than
 // the frame staying on screen, and a list that runs off the bottom of the
-// terminal drags the whole card with it.
-func (m playerModel) bodyRows() int {
+// terminal drags the whole card with it. The layout matters here because the
+// separator, state and footer rows are part of the same budget.
+func (m playerModel) bodyRows(l layout) int {
 	rows := artRows
 	if m.height > 0 {
-		// The header, the progress row and the "up next" line are drawn at
-		// every size, so they are spent before the panel gets any.
-		rows = minInt(rows, maxInt(m.height-frameChrome-3, 1))
+		reserved := 1 // header
+		reserved += 1 // progress
+		reserved += 1 // up next
+		if l.state {
+			reserved++
+		}
+		if l.footer {
+			reserved += 2
+		}
+		if l.separators {
+			reserved += 4
+		}
+		rows = minInt(rows, maxInt(m.height-frameChrome-reserved, 1))
 	}
 	return rows
 }
@@ -1223,13 +1260,24 @@ func wrapLyric(text string, width int) []string {
 	var lines []string
 	current := ""
 	for _, word := range strings.Fields(text) {
-		if lipgloss.Width(word) > width {
-			word = clip(word, width)
+		// A Tamil or Telugu lyric can be one long unspaced run. Splitting it
+		// by grapheme cluster is what keeps the line inside the column; the
+		// old clip() cut the words off at the first few glyphs and let the
+		// terminal wrap the overflow into the frame.
+		if displayWidth(word) > width {
+			if current != "" {
+				lines = append(lines, current)
+				current = ""
+			}
+			chunks := splitByWidth(word, width)
+			lines = append(lines, chunks[:len(chunks)-1]...)
+			current = chunks[len(chunks)-1]
+			continue
 		}
 		switch {
 		case current == "":
 			current = word
-		case lipgloss.Width(current)+1+lipgloss.Width(word) <= width:
+		case displayWidth(current)+1+displayWidth(word) <= width:
 			current += " " + word
 		default:
 			lines = append(lines, current)
@@ -1245,10 +1293,48 @@ func wrapLyric(text string, width int) []string {
 	return lines
 }
 
+// splitByWidth cuts an unspaced run into terminal-width chunks without
+// breaking a grapheme cluster (a base character plus its combining marks).
+func splitByWidth(text string, width int) []string {
+	width = maxInt(width, 1)
+
+	var lines []string
+	var current strings.Builder
+	lineWidth := 0
+	state := -1
+
+	for len(text) > 0 {
+		cluster, rest, clusterWidth, newState := uniseg.FirstGraphemeClusterInString(text, state)
+		if current.Len() > 0 && lineWidth+clusterWidth > width {
+			lines = append(lines, current.String())
+			current.Reset()
+			lineWidth = 0
+		}
+		current.WriteString(cluster)
+		lineWidth += clusterWidth
+		text = rest
+		state = newState
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
+}
+
+// displayWidth measures plain text the way the terminal lays out grapheme
+// clusters. lipgloss.Width is right for ANSI-styled ASCII, but Indic lyrics
+// combine marks in ways that need the grapheme-aware measurement.
+func displayWidth(text string) int {
+	return uniseg.StringWidth(text)
+}
+
 // centreIn pads text to the width of the column. Centring is what makes the
 // words read as a block of lyrics rather than as ragged metadata.
 func centreIn(text string, width int) string {
-	padding := width - lipgloss.Width(text)
+	padding := width - displayWidth(text)
 	if padding <= 0 {
 		return clip(text, width)
 	}

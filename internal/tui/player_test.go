@@ -1128,7 +1128,11 @@ func TestLyricsPanelFollowsThePlayhead(t *testing.T) {
 		t.Fatal("opening the panel did not ask for the words")
 	}
 
-	updated, _ = model.Update(cmd())
+	words := firstLyricsMessage(cmd)
+	if words == nil {
+		t.Fatal("opening the panel did not request lyrics")
+	}
+	updated, _ = model.Update(words)
 	model = updated.(playerModel)
 	if model.lyrics == nil {
 		t.Fatal("the words never arrived")
@@ -1224,6 +1228,27 @@ func TestLyricsPanelReloadsWhenTheTrackChanges(t *testing.T) {
 	}
 }
 
+// A lyric line in Tamil or Telugu often has no spaces to break at. It must be
+// split by grapheme cluster, not clipped: clipping loses the rest of the line,
+// and a line that overflows makes the terminal wrap it into the frame.
+func TestWrapLyricSplitsUnspacedIndicScript(t *testing.T) {
+	text := "துனியாமோனோபோலிதான்ஈனிஅறுசுத்தான்"
+	width := 12
+
+	lines := wrapLyric(text, width)
+	if len(lines) < 2 {
+		t.Fatalf("wrapLyric made %d line(s), want at least 2: %q", len(lines), lines)
+	}
+	for _, line := range lines {
+		if got := displayWidth(line); got > width {
+			t.Errorf("line is %d cells wide, want at most %d: %q", got, width, line)
+		}
+	}
+	if joined := strings.Join(lines, ""); joined != text {
+		t.Errorf("wrapping lost text:\n got %q\nwant %q", joined, text)
+	}
+}
+
 // testLyrics is three timed lines with a gap between them, which is what the
 // windowing has to cope with.
 func testLyrics() *lyrics.Doc {
@@ -1235,6 +1260,27 @@ func testLyrics() *lyrics.Doc {
 			{Start: 20 * time.Second, End: 24 * time.Second, Text: "third line"},
 		},
 	}
+}
+
+// firstLyricsMessage runs a command batch and returns the lyrics message, if
+// the batch asked for one.
+func firstLyricsMessage(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, command := range batch {
+			if result := firstLyricsMessage(command); result != nil {
+				return result
+			}
+		}
+		return nil
+	}
+	if _, ok := msg.(lyricsMsg); ok {
+		return msg
+	}
+	return nil
 }
 
 // containsLyricsRequest runs a command batch and reports whether one of its
@@ -1256,6 +1302,34 @@ func containsLyricsRequest(cmd tea.Cmd) bool {
 		}
 	}
 	return false
+}
+
+// Indic lyrics are wider in grapheme clusters than in runes. The rendered
+// frame must still fit the window; otherwise the terminal wraps a line and
+// the next tick draws over a frame that moved down.
+func TestIndicLyricsFitTheWindow(t *testing.T) {
+	model := testModel(100, 24)
+	model.showLyrics = true
+	model.lyrics = &lyrics.Doc{
+		Synced: true,
+		Lines: []lyrics.Line{
+			{Start: 0, End: 4 * time.Second, Text: "प्यारी आ गई, चोरी हो गई"},
+			{Start: 5 * time.Second, End: 9 * time.Second, Text: "எவனுக்குமே இது புரியாதே (why?)"},
+			{Start: 10 * time.Second, End: 14 * time.Second, Text: "துனியாமோனோபோலிதான்ஈனிஅறுசுத்தான்"},
+			{Start: 15 * time.Second, End: 19 * time.Second, Text: "ਦਿਲ ਵਾਲੇ ਪੁੱਛਦੇ ਨੇ क्या"},
+		},
+	}
+	model.status.Position = 7
+
+	view := model.View()
+	if got := len(viewLines(view)); got > model.height {
+		t.Errorf("lyrics frame is %d rows, window is %d", got, model.height)
+	}
+	for number, line := range viewLines(view) {
+		if got := lipgloss.Width(line); got > model.width {
+			t.Errorf("line %d is %d cells wide, window is %d: %q", number+1, got, model.width, line)
+		}
+	}
 }
 
 // The words take the metadata column's place, so the panel has to say what is
