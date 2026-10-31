@@ -9,6 +9,7 @@ import (
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/apple"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/auth"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/config"
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/lyrics"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/player"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/tui"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/ui"
@@ -35,6 +36,19 @@ func searchQueue(session *auth.Session, full bool) tui.Searcher {
 		}
 		tracks, _, _ := buildTracks(songs, !full)
 		return tracks, nil
+	}
+}
+
+// lyricsQueue is the words lookup the player calls when its lyrics panel is
+// open. Without a session the panel says lyrics are unavailable, which is
+// true: the words come from Apple, not from the track's metadata.
+func lyricsQueue(session *auth.Session) tui.Lyricist {
+	if session == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, track player.Track) (*lyrics.Doc, error) {
+		return session.Client.Lyrics(ctx, track.ID)
 	}
 }
 
@@ -74,6 +88,7 @@ func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, s
 				return startEngine(ctx, tracks, startIndex, full, true)
 			},
 			Search:    searchQueue(session, full),
+			Lyrics:    lyricsQueue(session),
 			Tracks:    tracks,
 			StopAfter: stopAfter,
 		})

@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/lyrics"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/player"
 )
 
@@ -81,7 +82,7 @@ func TestPlayerViewFitsTheWindow(t *testing.T) {
 	for _, size := range []struct{ width, height int }{
 		{120, 40}, {100, 30}, {80, 24}, {70, 20}, {60, 18}, {52, 20}, {44, 16}, {40, 14},
 	} {
-		for _, overlay := range []string{"", "queue", "help", "search", "starting", "playing"} {
+		for _, overlay := range []string{"", "queue", "help", "search", "lyrics", "starting", "playing"} {
 			model := testModel(size.width, size.height)
 			switch overlay {
 			case "queue":
@@ -90,6 +91,10 @@ func TestPlayerViewFitsTheWindow(t *testing.T) {
 				model.showHelp = true
 			case "search":
 				model = searchingModel(size.width, size.height)
+			case "lyrics":
+				model.showLyrics = true
+				model.lyrics = testLyrics()
+				model.status.Position = 11
 			case "starting":
 				// The line that carries the pulse is drawn at every width,
 				// because it is the only sign of life while the engine boots.
@@ -1095,5 +1100,176 @@ func TestDumpFrame(t *testing.T) {
 
 		model.search.editing = true
 		fmt.Printf("\n=== %dx%d while typing a search ===\n%s\n", size.width, size.height, model.View())
+
+		model = testModel(size.width, size.height)
+		model.showLyrics = true
+		model.lyrics = testLyrics()
+		model.status.Position = 11
+		fmt.Printf("\n=== %dx%d with the lyrics open ===\n%s\n", size.width, size.height, model.View())
+	}
+}
+
+// The lyrics panel is only useful if it can be followed: the words have to
+// arrive for the track that is playing, and the line being sung has to be the
+// one the eye lands on.
+func TestLyricsPanelFollowsThePlayhead(t *testing.T) {
+	model := testModel(100, 30)
+	model.tracks[0].ID = "42"
+	model.lyricist = func(context.Context, player.Track) (*lyrics.Doc, error) {
+		return testLyrics(), nil
+	}
+
+	updated, cmd := model.handleKey(press("y"))
+	model = updated.(playerModel)
+	if !model.showLyrics {
+		t.Fatal("y did not open the panel")
+	}
+	if cmd == nil {
+		t.Fatal("opening the panel did not ask for the words")
+	}
+
+	updated, _ = model.Update(cmd())
+	model = updated.(playerModel)
+	if model.lyrics == nil {
+		t.Fatal("the words never arrived")
+	}
+	if model.lyricsTrack != "42" {
+		t.Errorf("words were filed under %q, want 42", model.lyricsTrack)
+	}
+
+	// Third line, at 20 seconds.
+	model.status.Position = 21
+	panel := strings.Join(model.lyricsLines(40, 3), "\n")
+	for _, want := range []string{"first line", "second line", "third line"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("panel is missing %q:\n%s", want, panel)
+		}
+	}
+}
+
+// A panel opened before the first line has anything to sing shows the start of
+// the song rather than nothing at all.
+func TestLyricsPanelBeforeTheFirstLine(t *testing.T) {
+	model := testModel(100, 30)
+	model.showLyrics = true
+	model.lyrics = testLyrics()
+	model.status.Position = 0
+
+	panel := strings.Join(model.lyricsLines(40, 2), "\n")
+	if !strings.Contains(panel, "first line") {
+		t.Errorf("the panel did not start at the top:\n%s", panel)
+	}
+}
+
+// Words that arrive for a track that is no longer playing are worse than no
+// words at all, so they are dropped.
+func TestStaleLyricsAreIgnored(t *testing.T) {
+	model := testModel(100, 30)
+	model.tracks[0].ID = "42"
+	model.showLyrics = true
+
+	updated, _ := model.Update(lyricsMsg{trackID: "99", doc: testLyrics()})
+	if got := updated.(playerModel); got.lyrics != nil {
+		t.Fatal("words for another track were shown")
+	}
+}
+
+func TestLyricsPanelWithoutWords(t *testing.T) {
+	model := testModel(100, 30)
+	model.showLyrics = true
+	model.lyricist = func(context.Context, player.Track) (*lyrics.Doc, error) {
+		return nil, lyrics.ErrNone
+	}
+	model.lyricsErr = lyrics.ErrNone
+
+	panel := strings.Join(model.lyricsLines(40, 3), "\n")
+	if !strings.Contains(panel, "No lyrics for this track") {
+		t.Errorf("an empty panel said nothing useful:\n%s", panel)
+	}
+}
+
+// A lookup that failed is not the same answer as a track without words, and
+// the panel must not claim the song has none when the network went away.
+func TestLyricsPanelWhenTheLookupFails(t *testing.T) {
+	model := testModel(100, 30)
+	model.showLyrics = true
+	model.lyricist = func(context.Context, player.Track) (*lyrics.Doc, error) {
+		return nil, errors.New("dial tcp: no route to host")
+	}
+	model.lyricsErr = errors.New("dial tcp: no route to host")
+
+	panel := strings.Join(model.lyricsLines(40, 3), "\n")
+	if !strings.Contains(panel, "could not be loaded") {
+		t.Errorf("a failed lookup was reported as a track without words:\n%s", panel)
+	}
+}
+
+// A new track has to bring its own words: the panel cannot keep the previous
+// song's lyrics under the new title.
+func TestLyricsPanelReloadsWhenTheTrackChanges(t *testing.T) {
+	model := testModel(100, 30)
+	model.tracks[0].ID = "1"
+	model.tracks[1].ID = "2"
+	model.showLyrics = true
+	model.lyricsTrack = "1"
+	model.lyricist = func(context.Context, player.Track) (*lyrics.Doc, error) {
+		return testLyrics(), nil
+	}
+
+	model.status = player.Status{Index: 1, Position: 0, Duration: 200, Volume: 100}
+	_, cmd := model.Update(statusMsg(model.status))
+
+	if !containsLyricsRequest(cmd) {
+		t.Fatal("the panel did not ask for the new track's words")
+	}
+}
+
+// testLyrics is three timed lines with a gap between them, which is what the
+// windowing has to cope with.
+func testLyrics() *lyrics.Doc {
+	return &lyrics.Doc{
+		Synced: true,
+		Lines: []lyrics.Line{
+			{Start: 0, End: 4 * time.Second, Text: "first line"},
+			{Start: 10 * time.Second, End: 14 * time.Second, Text: "second line"},
+			{Start: 20 * time.Second, End: 24 * time.Second, Text: "third line"},
+		},
+	}
+}
+
+// containsLyricsRequest runs a command batch and reports whether one of its
+// commands was a lyrics lookup.
+func containsLyricsRequest(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		return false
+	}
+	for _, command := range batch {
+		if command == nil {
+			continue
+		}
+		if _, isLyrics := command().(lyricsMsg); isLyrics {
+			return true
+		}
+	}
+	return false
+}
+
+// The words take the metadata column's place, so the panel has to say what is
+// playing: otherwise the title leaves the screen with the metadata.
+func TestLyricsPanelKeepsTheTitle(t *testing.T) {
+	model := testModel(100, 30)
+	model.showLyrics = true
+	model.lyrics = testLyrics()
+
+	panel := strings.Join(model.lyricsLines(50, 10), "\n")
+	if !strings.Contains(panel, model.currentTrack().Title) {
+		t.Errorf("the panel does not name the track:\n%s", panel)
+	}
+	if !strings.Contains(panel, "first line") {
+		t.Errorf("the panel lost the words:\n%s", panel)
 	}
 }

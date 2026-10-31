@@ -51,16 +51,20 @@ type Client struct {
 	DevToken   string
 	UserToken  string
 	Storefront string
+	// LyricsHosts are tried in order for lyrics. See Lyrics for why they are
+	// not the catalogue host.
+	LyricsHosts []string
 }
 
 // NewClient builds a client. userToken may be empty for catalog-only use.
 func NewClient(devToken, userToken, storefront string) *Client {
 	return &Client{
-		HTTP:       &http.Client{Timeout: 30 * time.Second},
-		BaseURL:    "https://api.music.apple.com",
-		DevToken:   devToken,
-		UserToken:  userToken,
-		Storefront: storefront,
+		HTTP:        &http.Client{Timeout: 30 * time.Second},
+		BaseURL:     "https://api.music.apple.com",
+		DevToken:    devToken,
+		UserToken:   userToken,
+		Storefront:  storefront,
+		LyricsHosts: append([]string(nil), DefaultLyricsHosts...),
 	}
 }
 
@@ -68,7 +72,13 @@ func NewClient(devToken, userToken, storefront string) *Client {
 func (c *Client) HasUserToken() bool { return c.UserToken != "" }
 
 func (c *Client) do(ctx context.Context, path string, query url.Values, out any) error {
-	requestURL := c.BaseURL + path
+	return c.doAt(ctx, c.BaseURL, path, query, out)
+}
+
+// doAt performs a request against a specific host. The catalogue and the
+// lyrics live on different hosts, and both need the same headers.
+func (c *Client) doAt(ctx context.Context, base, path string, query url.Values, out any) error {
+	requestURL := base + path
 	if len(query) > 0 {
 		requestURL += "?" + query.Encode()
 	}

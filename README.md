@@ -126,10 +126,17 @@ browser boot: process 3.8s, page target 100ms, MusicKit 5.4s, queue 2.2s, first 
 | `n` / `p` | Next or previous track |
 | `a` | Toggle queue |
 | `/` | Search and add to queue |
+| `y` | Show or hide lyrics |
 | `v` | Toggle spectrum |
 | `?` | Show keys |
 | `esc` | Close an overlay, then quit |
 | `q` | Quit |
+
+## Lyrics
+
+`y` shows the words for the track that is playing. They take the place of the metadata column, so the cover stays where it is and the title and credit sit above the words. The line being sung is held near the middle of the panel and the lines around it are dimmed; they move on their own as the track does, and a new track brings its own words without asking.
+
+The lyrics are Apple's own, timed to the recording, and they come from the catalogue. A track Apple has no lyrics for says so rather than showing an empty panel, and that is the usual answer for instrumentals. Instrumental intros have no line to highlight, so the first line waits at the top until it is sung.
 
 ## Interface
 
@@ -153,7 +160,7 @@ browser boot: process 3.8s, page target 100ms, MusicKit 5.4s, queue 2.2s, first 
 │  Playing...                                                │
 │                                                            │
 │  space play   ←→ seek   ↑↓ vol   n/p track                 │
-│  a queue   v viz   ? help   q quit                         │
+│  a queue   / search   y lyrics   v viz   ? help   q quit   │
 ╰────────────────────────────────────────────────────────────╯
 ```
 

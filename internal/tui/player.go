@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/artwork"
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/lyrics"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/player"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/visualizer"
 )
@@ -78,6 +80,11 @@ var pulseFrames = []string{"·", "•", "●", "•"}
 // ignorant of how the catalogue is reached.
 type Searcher func(ctx context.Context, query string) ([]player.Track, error)
 
+// Lyricist looks up the timed lyrics for a track. It is passed in for the same
+// reason the searcher is: the interface should not know where the words come
+// from, or that some tracks have none.
+type Lyricist func(ctx context.Context, track player.Track) (*lyrics.Doc, error)
+
 // Options configure the player interface.
 type Options struct {
 	// Start brings the engine up once the interface is on screen.
@@ -85,6 +92,9 @@ type Options struct {
 	// Search finds tracks to add to the queue. Without it the search panel
 	// says so instead of offering a field that goes nowhere.
 	Search Searcher
+	// Lyrics finds the words for a track. Without it the panel says so
+	// rather than opening empty.
+	Lyrics Lyricist
 	// Tracks is the queue to begin with.
 	Tracks []player.Track
 	// StopAfter quits once playback has run this long.
@@ -119,6 +129,13 @@ type (
 		err error
 	}
 
+	// lyricsMsg carries a track's words back from the fetch goroutine.
+	lyricsMsg struct {
+		trackID string
+		doc     *lyrics.Doc
+		err     error
+	}
+
 	// pulseMsg advances the animation on the status line.
 	pulseMsg struct{}
 )
@@ -150,6 +167,18 @@ type playerModel struct {
 	// searcher is the catalogue lookup behind the search panel.
 	searcher Searcher
 	search   searchState
+
+	// lyricist fetches the words behind the lyrics panel.
+	lyricist Lyricist
+
+	// Lyrics panel state. The document is kept with the id of the track it
+	// belongs to, so a queue that moved on never shows the previous song's
+	// words under the current title.
+	lyrics        *lyrics.Doc
+	lyricsTrack   string
+	lyricsLoading bool
+	lyricsErr     error
+	showLyrics    bool
 
 	// start brings the engine up. It is nil once the engine is running, and
 	// nil from the outset when one was handed over ready-made.
@@ -310,6 +339,24 @@ func (m playerModel) enqueueCommand(track player.Track) tea.Cmd {
 	}
 }
 
+// lyricsCommand fetches the words for the track on screen. It runs off the
+// update loop for the same reason the cover does: the catalogue is a network
+// away, and the progress bar must keep moving while it answers.
+func (m playerModel) lyricsCommand() tea.Cmd {
+	track := m.currentTrack()
+	if m.lyricist == nil || track.ID == "" {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		doc, err := m.lyricist(ctx, track)
+		return lyricsMsg{trackID: track.ID, doc: doc, err: err}
+	}
+}
+
 // artCommand downloads the current track's cover unless it is already on
 // screen. The download happens off the update loop, so a slow CDN cannot stall
 // the interface.
@@ -395,7 +442,30 @@ func (m playerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.art = nil
 		}
 
-		return m, tea.Batch(refresh(m.engine), m.artCommand())
+		// The words follow the music. A track that changed while the panel is
+		// open needs its own lyrics, and one request per track is enough: a
+		// track without lyrics must not be asked for again on every poll.
+		commands := []tea.Cmd{refresh(m.engine), m.artCommand()}
+		if m.showLyrics && m.lyricist != nil && !m.lyricsLoading {
+			if track := m.currentTrack(); track.ID != "" && track.ID != m.lyricsTrack {
+				m.lyricsLoading = true
+				m.lyricsErr = nil
+				commands = append(commands, m.lyricsCommand())
+			}
+		}
+		return m, tea.Batch(commands...)
+
+	case lyricsMsg:
+		// Words for a track that has since moved on are stale, and showing
+		// them under the new title would be worse than showing nothing.
+		if msg.trackID != m.currentTrack().ID {
+			return m, nil
+		}
+		m.lyricsLoading = false
+		m.lyricsTrack = msg.trackID
+		m.lyricsErr = msg.err
+		m.lyrics = msg.doc
+		return m, nil
 
 	case bandsMsg:
 		m.bands = msg
@@ -517,6 +587,25 @@ func (m playerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.showQueue = !m.showQueue
 		m.showHelp = false
+
+	case "y":
+		m.showLyrics = !m.showLyrics
+		m.showHelp = false
+		if !m.showLyrics {
+			return m, nil
+		}
+		if m.lyricist == nil {
+			m.lyricsErr = fmt.Errorf("lyrics are not available here")
+			return m, nil
+		}
+		// Opening the panel is also how a failed lookup is retried: the track
+		// has not changed, but the reason for the empty panel may have.
+		if track := m.currentTrack(); track.ID != m.lyricsTrack || m.lyricsErr != nil {
+			m.lyricsLoading = true
+			m.lyricsErr = nil
+			return m, m.lyricsCommand()
+		}
+		return m, nil
 
 	case "v":
 		m.showSpectrum = !m.showSpectrum
@@ -862,6 +951,9 @@ func (m playerModel) bodyColumn(content int, cover bool) []string {
 	if m.search.open {
 		return m.searchLines(width, m.bodyRows())
 	}
+	if m.showLyrics {
+		return m.lyricsLines(width, m.bodyRows())
+	}
 	return m.metaLines(width)
 }
 
@@ -1024,6 +1116,146 @@ func (m playerModel) metaLines(width int) []string {
 	return lines
 }
 
+// lyricsLines draws the words for the track on screen, keeping the line being
+// sung in the middle of the panel so the eye never has to chase it.
+//
+// The words take the metadata column's place, so the title and the credit stay
+// above them: once the words are moving, that is the only thing still saying
+// what is playing. A card too short for both gets the words, because that is
+// what the panel was opened for.
+func (m playerModel) lyricsLines(width, rows int) []string {
+	if rows <= 0 {
+		return nil
+	}
+	// Four rows is the title, the credit, the gap under them and one line of
+	// words. Below that the words get the panel to themselves.
+	if rows < 4 {
+		return m.lyricsBody(width, rows)
+	}
+
+	track := m.currentTrack()
+	artist := track.Artist
+	if lipgloss.Width(artist) > width {
+		artist = summarizeArtists(artist)
+	}
+	lines := []string{
+		titleStyle.Render(centreIn(track.Title, width)),
+		artistStyle.Render(centreIn(artist, width)),
+		"",
+	}
+	return append(lines, m.lyricsBody(width, rows-len(lines))...)
+}
+
+// lyricsBody is the words themselves, or the reason there are none.
+func (m playerModel) lyricsBody(width, rows int) []string {
+	if rows <= 0 {
+		return nil
+	}
+
+	if m.lyrics == nil || len(m.lyrics.Lines) == 0 {
+		switch {
+		case m.lyricist == nil:
+			return m.lyricsNote(width, "Lyrics are not available here.")
+		case m.lyricsLoading:
+			return m.lyricsNote(width, "Looking up the words...")
+		case m.lyricsErr != nil && !errors.Is(m.lyricsErr, lyrics.ErrNone):
+			// A track with no lyrics is an answer; a failed lookup is not,
+			// and saying "no lyrics" for it would be a lie that survives
+			// until the panel is reopened.
+			return m.lyricsNote(width, "The lyrics could not be loaded.")
+		default:
+			return m.lyricsNote(width, "No lyrics for this track.")
+		}
+	}
+
+	// Words without timings cannot be followed, and neither can a timed song
+	// that has not started: in both cases nothing is highlighted and the panel
+	// starts at the top, which is where the first line is.
+	active := -1
+	if m.lyrics.Synced {
+		active = m.lyrics.LineAt(m.playhead())
+	}
+
+	// Wrapping happens before the window is chosen: a line that needs two rows
+	// has to be counted as two, or the window lands in the middle of a line.
+	var panel []string
+	activeRow := 0
+	for index, line := range m.lyrics.Lines {
+		wrapped := wrapLyric(line.Text, width)
+		if index == active {
+			activeRow = len(panel)
+		}
+		for _, part := range wrapped {
+			if index == active {
+				panel = append(panel, m.accentStyle().Bold(true).Render(centreIn(part, width)))
+				continue
+			}
+			panel = append(panel, helpStyle.Render(centreIn(part, width)))
+		}
+	}
+
+	// The sung line sits just above the middle, which leaves room for what is
+	// coming and keeps the words steady rather than jumping on every update.
+	top := clampInt(activeRow-(rows-1)/2, 0, maxInt(len(panel)-rows, 0))
+	return panel[top:minInt(top+rows, len(panel))]
+}
+
+// lyricsNote is the panel with nothing to show, said plainly.
+func (m playerModel) lyricsNote(width int, note string) []string {
+	return []string{helpStyle.Render(centreIn(note, width))}
+}
+
+// playhead is the engine's position as a duration. The status carries seconds
+// because that is what both engines report; lyrics need the finer form.
+func (m playerModel) playhead() time.Duration {
+	if m.status.Position <= 0 {
+		return 0
+	}
+	return time.Duration(m.status.Position * float64(time.Second))
+}
+
+// wrapLyric breaks one lyric line to the width of the column. Lyrics are
+// written one line at a time, and the column beside the cover is about fifty
+// cells, so most of them have to be broken somewhere.
+func wrapLyric(text string, width int) []string {
+	width = maxInt(width, 1)
+
+	var lines []string
+	current := ""
+	for _, word := range strings.Fields(text) {
+		if lipgloss.Width(word) > width {
+			word = clip(word, width)
+		}
+		switch {
+		case current == "":
+			current = word
+		case lipgloss.Width(current)+1+lipgloss.Width(word) <= width:
+			current += " " + word
+		default:
+			lines = append(lines, current)
+			current = word
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
+}
+
+// centreIn pads text to the width of the column. Centring is what makes the
+// words read as a block of lyrics rather than as ragged metadata.
+func centreIn(text string, width int) string {
+	padding := width - lipgloss.Width(text)
+	if padding <= 0 {
+		return clip(text, width)
+	}
+	left := padding / 2
+	return strings.Repeat(" ", left) + text + strings.Repeat(" ", padding-left)
+}
+
 func (m playerModel) spectrumVisible(width int) bool {
 	return m.showSpectrum && len(m.bands) > 0 && width >= spectrumMinContent
 }
@@ -1182,6 +1414,7 @@ var helpHints = [][2]string{
 	{"n / p", "next or previous track"},
 	{"a", "show or hide the queue"},
 	{"/", "search and add to the queue"},
+	{"y", "show or hide the lyrics"},
 	{"v", "show or hide the spectrum"},
 	{"esc / q", "close a panel, or quit"},
 }
@@ -1270,7 +1503,16 @@ func (m playerModel) pulseFrame() string {
 // narrow card never drops a single stray hint onto a line of its own.
 var footerHints = [][][2]string{
 	{{"space", "play"}, {"←→", "seek"}, {"↑↓", "vol"}, {"n/p", "track"}},
-	{{"a", "queue"}, {"/", "search"}, {"v", "viz"}, {"?", "help"}, {"q", "quit"}},
+	{{"a", "queue"}, {"/", "search"}, {"y", "lyrics"}, {"v", "viz"}, {"?", "help"}, {"q", "quit"}},
+}
+
+// narrowFooterHints is the same footer without the spectrum key. The spectrum
+// is not drawn on a card that narrow, so pressing the key would change
+// nothing, and the line it costs is the line that decides whether the footer
+// fits at all.
+var narrowFooterHints = [][][2]string{
+	{{"space", "play"}, {"←→", "seek"}, {"↑↓", "vol"}, {"n/p", "track"}},
+	{{"a", "queue"}, {"/", "search"}, {"y", "lyrics"}, {"?", "help"}, {"q", "quit"}},
 }
 
 // The search panel draws its own hints, because the transport keys are exactly
@@ -1291,6 +1533,8 @@ func (m playerModel) footerLines(content int) []string {
 		groups = searchTypingHints
 	case m.search.open:
 		groups = searchResultHints
+	case content < spectrumMinContent:
+		groups = narrowFooterHints
 	}
 
 	var lines []string
@@ -1493,6 +1737,7 @@ func Play(opts Options) error {
 	model := playerModel{
 		tracks:       opts.Tracks,
 		searcher:     opts.Search,
+		lyricist:     opts.Lyrics,
 		stopAfter:    opts.StopAfter,
 		monitor:      monitor,
 		bands:        make([]float64, visualizer.BandCount),
