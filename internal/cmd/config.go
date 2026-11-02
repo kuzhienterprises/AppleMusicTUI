@@ -34,7 +34,10 @@ var settings = []setting{
 	{
 		name: "openaiKey",
 		help: "key recommendations are bought with (OPENAI_API_KEY wins over it)",
-		read: func(c config.Config) string { return c.OpenAIKey },
+		// Read through the resolver rather than the saved settings: the key
+		// may be in the environment or the env file, and this row is where
+		// somebody looks to find out whether it is set at all.
+		read: func(config.Config) string { return openAIKey() },
 		write: func(c *config.Config, value string) {
 			c.OpenAIKey = value
 		},
@@ -105,7 +108,7 @@ The file is not overwritten if it already exists.`,
 			}
 			if created {
 				ui.OK("Created %s.", path)
-				ui.Info("Put a key in it, e.g. OPENAI_API_KEY=sk-...")
+				ui.Info("Put a key in it on its own line, without the #: OPENAI_API_KEY=sk-...")
 				return nil
 			}
 			ui.OK("%s already exists.", path)
@@ -198,4 +201,14 @@ func openAIKey() string {
 		return key
 	}
 	return strings.TrimSpace(config.Load().OpenAIKey)
+}
+
+// missingKeyHint says where a key can go, or what is wrong with the one that
+// looks like it is already there. A key pasted after the "#" in the env file
+// is a comment, and "no key" would otherwise be said to a file holding one.
+func missingKeyHint() string {
+	if config.Commented("OPENAI_API_KEY") {
+		return "the OPENAI_API_KEY line in " + config.EnvFile + " is commented out - remove the leading #"
+	}
+	return "set OPENAI_API_KEY, put it in " + config.EnvFile + ", or run `am config set openaiKey <key>`"
 }

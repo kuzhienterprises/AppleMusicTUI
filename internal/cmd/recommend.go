@@ -63,7 +63,7 @@ The key is read from OPENAI_API_KEY, or from ` + "`am config set openaiKey`" + `
 
 			key := openAIKey()
 			if key == "" {
-				return errors.New("no OpenAI key: set OPENAI_API_KEY, or run `am config set openaiKey <key>`")
+				return fmt.Errorf("no OpenAI key: %s", missingKeyHint())
 			}
 			if model == "" {
 				model = strings.TrimSpace(config.Load().OpenAIModel)

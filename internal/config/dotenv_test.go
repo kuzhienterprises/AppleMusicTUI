@@ -120,3 +120,30 @@ func TestWriteEnvTemplateDoesNotOverwrite(t *testing.T) {
 		t.Errorf("body = %q, want the key that was written", body)
 	}
 }
+
+// A key pasted after the "#" of the template is a comment, and saying so is
+// the difference between a fixable mistake and a mystifying one.
+func TestCommentedFindsAKeyInAComment(t *testing.T) {
+	dir := t.TempDir()
+	originalFile, originalDir := EnvFile, Dir
+	EnvFile = filepath.Join(dir, ".env")
+	Dir = dir
+	defer func() { EnvFile, Dir = originalFile, originalDir }()
+
+	if err := os.WriteFile(EnvFile, []byte("# OPENAI_API_KEY=sk-abc\n# a comment\n"), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	if !Commented("OPENAI_API_KEY") {
+		t.Error("a commented key was not noticed")
+	}
+	if Commented("SOMETHING_ELSE") {
+		t.Error("a name that is not there was reported")
+	}
+
+	if err := os.WriteFile(EnvFile, []byte("OPENAI_API_KEY=sk-abc\n"), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	if Commented("OPENAI_API_KEY") {
+		t.Error("an active key was reported as commented")
+	}
+}

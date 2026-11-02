@@ -153,7 +153,7 @@ am recommend                     # ask, look up, play
 am recommend --count 5 --print   # just the list, with a reason for each
 ```
 
-A key can live in three places, and the first one that is set wins: `OPENAI_API_KEY` in the environment, the env file `am config env` creates, and the saved settings (`am config set openaiKey`). The env file is a plain `KEY=VALUE` file, owner-only, read before every command, and never sent anywhere except to the model it names.
+A key can live in three places, and the first one that is set wins: `OPENAI_API_KEY` in the environment, the env file `am config env` creates, and the saved settings (`am config set openaiKey`). The env file is a plain `KEY=VALUE` file, owner-only, read before every command, and never sent anywhere except to the model it names. The key goes on its own line, not after the `#` the example uses.
 
 `--model` picks another model, `--window` sets how much history to read (up to 90 plays), and `--json` prints the resolved tracks for a script. A suggestion the catalogue cannot find is reported instead of played, and the artist has to match, so a cover is not passed off as the recording that was meant.
 

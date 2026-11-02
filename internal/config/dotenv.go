@@ -22,10 +22,13 @@ var EnvFile = filepath.Join(Dir, ".env")
 // documentation is how keys end up in the wrong hands.
 const EnvFileTemplate = `# Environment for every am command.
 #
-# One KEY=VALUE per line. A variable already set in the environment wins over
-# the line here. This file is read locally and never sent anywhere.
+# One KEY=VALUE per line. A line that starts with # is a comment, so a key
+# pasted after one is ignored. A variable already set in the environment wins
+# over the line here.
 #
-# OPENAI_API_KEY=sk-...
+# Put a key on its own line, without the #:
+#
+#   OPENAI_API_KEY=sk-...
 `
 
 // LoadEnv reads KEY=VALUE lines from path into the process environment,
@@ -103,6 +106,32 @@ func WriteEnvTemplate() (string, bool, error) {
 	}
 	_ = os.Chmod(EnvFile, 0o600)
 	return EnvFile, true, nil
+}
+
+// Commented reports whether name appears in the env file only as a comment.
+//
+// It exists because the file the tool writes holds the example in a comment,
+// and pasting a real key after the "#" is the obvious thing to do. It looks
+// right, it is ignored, and without this the failure reads as "no key" with a
+// file that plainly has one in it.
+func Commented(name string) bool {
+	file, err := os.Open(EnvFile)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		text := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(text, "#") {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(strings.TrimLeft(text, "#")), name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // EnvFileStatus describes the env file for `am config` and `am doctor`,
