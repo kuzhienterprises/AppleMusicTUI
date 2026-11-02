@@ -67,7 +67,7 @@ func newPlaylistsCommand() *cobra.Command {
 				ui.Warn("That playlist is empty")
 				return nil
 			}
-			return playSongs(ctx, session, tracks, 0, stopAfter)
+			return playSongs(ctx, session, tracks, playOptions{stopAfter: stopAfter, radio: flagRadio})
 		},
 	}
 
@@ -108,7 +108,7 @@ Accepts a library id (p.…), a catalogue id (pl.…), or a name.`,
 			}
 
 			ui.Info("\u25b6 %s (%d tracks)", name, len(tracks))
-			return playSongs(ctx, session, tracks, 0, stopAfter)
+			return playSongs(ctx, session, tracks, playOptions{stopAfter: stopAfter, radio: flagRadio})
 		},
 	}
 

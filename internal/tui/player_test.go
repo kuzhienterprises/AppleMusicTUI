@@ -1347,3 +1347,129 @@ func TestLyricsPanelKeepsTheTitle(t *testing.T) {
 		t.Errorf("the panel lost the words:\n%s", panel)
 	}
 }
+
+// The queue is finite, so when its last track starts the player asks for more.
+// The batch is enqueued and appended to what the interface shows, in that
+// order: the queue on screen never claims a track the engine does not have.
+func TestRadioExtendsTheQueueAtItsEnd(t *testing.T) {
+	engine := &stubEngine{status: player.Status{Index: 0, Duration: 200, Position: 5}}
+	model := testModel(100, 30)
+	model.engine = engine
+	model.tracks = model.tracks[:1]
+	model.tracks[0].ID = "a"
+
+	calls := 0
+	model.extender = func(_ context.Context, queued []player.Track) ([]player.Track, error) {
+		calls++
+		if len(queued) != 1 || queued[0].ID != "a" {
+			t.Errorf("the extender was given %+v, want the queued track", queued)
+		}
+		return []player.Track{{ID: "b", Title: "Next"}, {ID: "c", Title: "After"}}, nil
+	}
+
+	updated, cmd := model.Update(statusMsg(engine.status))
+	model = updated.(playerModel)
+	if !model.extending {
+		t.Fatal("the queue did not ask for more at its end")
+	}
+
+	extended := findExtended(t, runBatch(t, cmd))
+	updated, _ = model.Update(extended)
+	model = updated.(playerModel)
+
+	if calls != 1 {
+		t.Errorf("the extender ran %d times, want 1", calls)
+	}
+	if len(engine.added) != 2 || engine.added[0].ID != "b" {
+		t.Errorf("engine queue = %+v, want the batch", engine.added)
+	}
+	if len(model.tracks) != 3 || model.tracks[2].ID != "c" {
+		t.Errorf("queue = %+v, want the batch appended", model.tracks)
+	}
+	if model.extending || model.radioErr != nil {
+		t.Errorf("extending=%v radioErr=%v after a good batch", model.extending, model.radioErr)
+	}
+
+	// The new last track is not playing yet, so the queue must not ask again.
+	if model.shouldExtend() {
+		t.Error("the queue asked for more before its new end")
+	}
+}
+
+// A queue that cannot be extended is asked a few times, then allowed to end,
+// with the reason left on screen instead of the music stopping for no visible
+// reason.
+func TestRadioGivesUpAfterRepeatedFailures(t *testing.T) {
+	engine := &stubEngine{status: player.Status{Index: 0, Duration: 200, Position: 200, Finished: true}}
+	model := testModel(100, 30)
+	model.engine = engine
+	model.tracks = model.tracks[:1]
+	model.extender = func(context.Context, []player.Track) ([]player.Track, error) {
+		return nil, errors.New("no model today")
+	}
+
+	for attempt := 0; attempt < radioAttempts; attempt++ {
+		updated, cmd := model.Update(statusMsg(engine.status))
+		model = updated.(playerModel)
+		if !model.extending {
+			t.Fatalf("attempt %d never started", attempt)
+		}
+		updated, _ = model.Update(findExtended(t, runBatch(t, cmd)))
+		model = updated.(playerModel)
+	}
+
+	if model.shouldExtend() {
+		t.Error("still asking for more after the limit")
+	}
+	if model.radioErr == nil {
+		t.Error("the failure was not kept for the screen")
+	}
+	if line := model.noticeLine(72); !strings.Contains(line, "could not add more tracks") {
+		t.Errorf("notice = %q, want the failure", line)
+	}
+
+	// And now the queue is allowed to end.
+	updated, cmd := model.Update(statusMsg(engine.status))
+	model = updated.(playerModel)
+	if cmd == nil {
+		t.Fatal("expected the interface to quit")
+	}
+	if msg := cmd(); msg != tea.Quit() {
+		t.Errorf("msg = %T, want tea.Quit", msg)
+	}
+}
+
+// runBatch runs a command batch and returns the messages it produced, which is
+// how the tests see the work the interface scheduled.
+func runBatch(t *testing.T, cmd tea.Cmd) []tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nothing was scheduled")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected a batch, got %T", cmd())
+	}
+	var msgs []tea.Msg
+	for _, command := range batch {
+		if command == nil {
+			continue
+		}
+		if msg := command(); msg != nil {
+			msgs = append(msgs, msg)
+		}
+	}
+	return msgs
+}
+
+// findExtended picks the extension out of a batch's messages.
+func findExtended(t *testing.T, msgs []tea.Msg) extendedMsg {
+	t.Helper()
+	for _, msg := range msgs {
+		if extended, ok := msg.(extendedMsg); ok {
+			return extended
+		}
+	}
+	t.Fatal("the batch produced no extension")
+	return extendedMsg{}
+}

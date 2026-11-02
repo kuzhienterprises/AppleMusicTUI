@@ -12,7 +12,9 @@ import (
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/apple"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/auth"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/config"
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/player"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/recommend"
+	"github.com/kuzhienterprises/AppleMusicTUI/internal/tui"
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/ui"
 )
 
@@ -32,6 +34,7 @@ func newRecommendCommand() *cobra.Command {
 		window    int
 		printOnly bool
 		asJSON    bool
+		once      bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,6 +43,10 @@ func newRecommendCommand() *cobra.Command {
 		Long: `Reads your recently played history from Apple Music, asks an OpenAI model for
 tracks you have not just played, looks each one up in the catalogue, and plays
 the ones that exist.
+
+When that batch runs out it asks again, and keeps the queue going until you
+quit: five tracks at a time, chosen from what you have been listening to.
+--once plays just the one batch, and --print lists it without playing.
 
 The recommendations come from your own listening: what Apple has recorded
 across your devices, plus the names of your playlists. Nothing about you is
@@ -61,16 +68,11 @@ The key is read from OPENAI_API_KEY, or from ` + "`am config set openaiKey`" + `
 				window = 90 // three pages is as far back as the history goes usefully
 			}
 
-			key := openAIKey()
-			if key == "" {
-				return fmt.Errorf("no OpenAI key: %s", missingKeyHint())
+			key, resolved, err := modelSettings(model)
+			if err != nil {
+				return err
 			}
-			if model == "" {
-				model = strings.TrimSpace(config.Load().OpenAIModel)
-			}
-			if model == "" {
-				model = defaultModel
-			}
+			model = resolved
 
 			session, err := auth.Connect(ctx, true)
 			if err != nil {
@@ -125,7 +127,7 @@ The key is read from OPENAI_API_KEY, or from ` + "`am config set openaiKey`" + `
 			for _, pick := range picks {
 				songs = append(songs, pick.Song)
 			}
-			return playSongs(ctx, session, songs, 0, 0)
+			return playSongs(ctx, session, songs, playOptions{radio: !once})
 		},
 	}
 
@@ -134,8 +136,102 @@ The key is read from OPENAI_API_KEY, or from ` + "`am config set openaiKey`" + `
 	cmd.Flags().IntVar(&window, "window", recommendWindow, "how many recent plays to read, up to 90")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "list the tracks instead of playing them")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the tracks as JSON")
+	cmd.Flags().BoolVar(&once, "once", false, "play just this batch, instead of continuing when it runs out")
 
 	return cmd
+}
+
+// radioBatch is how many tracks one extension adds. Five is about a side of a
+// record: long enough that the model is not asked again in a moment, short
+// enough that a session can still change direction.
+const radioBatch = 5
+
+// modelSettings resolves the key and model a model-backed command needs. The
+// key comes from the environment, the env file, or the saved settings, in that
+// order; the model from the flag, the settings, or the default.
+func modelSettings(flagModel string) (key, model string, err error) {
+	key = openAIKey()
+	if key == "" {
+		return "", "", fmt.Errorf("no OpenAI key: %s", missingKeyHint())
+	}
+	model = strings.TrimSpace(flagModel)
+	if model == "" {
+		model = strings.TrimSpace(config.Load().OpenAIModel)
+	}
+	if model == "" {
+		model = defaultModel
+	}
+	return key, model, nil
+}
+
+// radioQueue is the extender the player calls when its queue is running out.
+// Without a session or a key there is nothing to extend with, so it is nil and
+// the queue ends where it ends.
+func radioQueue(session *auth.Session, key, model string, full bool) tui.Extend {
+	if session == nil || key == "" {
+		return nil
+	}
+
+	return func(ctx context.Context, queued []player.Track) ([]player.Track, error) {
+		plays, err := session.Client.RecentPlays(ctx, recommendWindow)
+		if err != nil {
+			return nil, err
+		}
+
+		profile := recommend.BuildProfile(plays, playlistNames(ctx, session))
+		profile.Queued = queueLabels(queued)
+
+		suggestions, err := recommend.Ask(ctx, ai.NewClient(key, model), profile, radioBatch)
+		if err != nil {
+			return nil, err
+		}
+
+		picks, _, err := recommend.Resolve(ctx, func(ctx context.Context, query string) ([]apple.Song, error) {
+			return session.Client.SearchSongs(ctx, query, 5)
+		}, suggestions, radioBatch)
+		if err != nil {
+			return nil, err
+		}
+
+		// The model was told what is already queued, but that is a request
+		// rather than a guarantee: anything it repeats is dropped here, by
+		// catalogue id, so a second pressing of the same song is dropped too.
+		seen := map[string]bool{}
+		for _, track := range queued {
+			seen[track.ID] = true
+		}
+		songs := make([]apple.Song, 0, len(picks))
+		for _, pick := range picks {
+			id := pick.Song.CatalogID
+			if id == "" {
+				id = pick.Song.ID
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			songs = append(songs, pick.Song)
+		}
+		if len(songs) == 0 {
+			return nil, errors.New("every track the model suggested is already queued")
+		}
+
+		tracks, _, _ := buildTracks(songs, !full)
+		if len(tracks) == 0 {
+			return nil, errors.New("none of the suggestions can be played here")
+		}
+		return tracks, nil
+	}
+}
+
+// queueLabels renders the queue for the prompt, newest last, so the model can
+// see what is already coming.
+func queueLabels(queued []player.Track) []string {
+	labels := make([]string, 0, len(queued))
+	for _, track := range queued {
+		labels = append(labels, track.Label())
+	}
+	return labels
 }
 
 // playlistNames reads the names of the library playlists. Playlist names are a

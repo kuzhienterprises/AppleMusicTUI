@@ -52,11 +52,22 @@ func lyricsQueue(session *auth.Session) tui.Lyricist {
 	}
 }
 
+// playOptions is what a play command asks for beyond the songs themselves:
+// where to start, when to stop, and whether the queue should keep going when
+// it runs out.
+type playOptions struct {
+	startIndex int
+	stopAfter  time.Duration
+	// radio lets the queue be extended with recommendations when the last
+	// track starts. It needs a model, so it costs money and is opted into.
+	radio bool
+}
+
 // playSongs converts API songs into a play queue, picks a playback engine, and
-// hands both to the interface (or the plain printer). startIndex refers to a
-// position in songs, not in the resulting queue. The session is what lets the
-// player search the catalogue again to add to the queue.
-func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, startIndex int, stopAfter time.Duration) error {
+// hands both to the interface (or the plain printer). startIndex in opts refers
+// to a position in songs, not in the resulting queue. The session is what lets
+// the player search the catalogue again to add to the queue.
+func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, opts playOptions) error {
 	full, err := useFullPlayback()
 	if err != nil {
 		return err
@@ -72,10 +83,29 @@ func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, s
 	if skipped > 0 {
 		ui.Warn("%d track(s) had no audio and were skipped", skipped)
 	}
+	startIndex := opts.startIndex
 	if mapped, ok := indexMap[startIndex]; ok {
 		startIndex = mapped
 	} else {
 		startIndex = 0
+	}
+
+	// A radio queue is a model away from working, and finding out halfway
+	// through the last track is too late to say anything useful.
+	var extend tui.Extend
+	if opts.radio && session != nil && session.UserToken == "" {
+		// The taste profile is the account's history and library, and both
+		// need a signed-in session. A queue that cannot be extended is
+		// better than one that tries and fails every few tracks.
+		ui.Warn("--radio needs a signed-in session for your listening history; playing without it")
+		opts.radio = false
+	}
+	if opts.radio {
+		key, model, err := modelSettings("")
+		if err != nil {
+			return err
+		}
+		extend = radioQueue(session, key, model, full)
 	}
 
 	// The interface comes up first and shows the wait. Bringing the engine up
@@ -89,8 +119,9 @@ func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, s
 			},
 			Search:    searchQueue(session, full),
 			Lyrics:    lyricsQueue(session),
+			Extend:    extend,
 			Tracks:    tracks,
-			StopAfter: stopAfter,
+			StopAfter: opts.stopAfter,
 		})
 	}
 
@@ -106,7 +137,7 @@ func playSongs(ctx context.Context, session *auth.Session, songs []apple.Song, s
 	if !flagPlain {
 		ui.Info("(stdout is not a terminal: playing without the interface)")
 	}
-	return player.PlayPlain(ctx, engine, tracks, startIndex, stopAfter)
+	return player.PlayPlain(ctx, engine, tracks, startIndex, opts.stopAfter, extend)
 }
 
 // useFullPlayback decides between full-length audio and the 30 second preview

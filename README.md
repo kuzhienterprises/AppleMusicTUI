@@ -96,7 +96,7 @@ am status
 
 `login` opens a browser for you to sign in. The app commands are `doctor`, `login`, `status`, `search`, `playlists`, `playlist`, `play`, `recommend` and `config`, plus `daemon` for the warm player described below.
 
-Global flags: `--plain` never takes over the terminal, `--engine auto|full|preview` chooses how playback runs, `--headless` runs the playback browser with no window at all instead of parking one off-screen, `--no-daemon` never keeps a player warm between commands, `--storefront us` pins a storefront, `--verbose` adds diagnostic detail, and `--json` prints machine-readable output on `search`, `playlists` and `status`.
+Global flags: `--plain` never takes over the terminal, `--engine auto|full|preview` chooses how playback runs, `--headless` runs the playback browser with no window at all instead of parking one off-screen, `--no-daemon` never keeps a player warm between commands, `--radio` keeps the queue going with recommendations when it runs out, `--storefront us` pins a storefront, `--verbose` adds diagnostic detail, and `--json` prints machine-readable output on `search`, `playlists` and `status`.
 
 ## The warm player
 
@@ -157,7 +157,9 @@ A key can live in three places, and the first one that is set wins: `OPENAI_API_
 
 `--model` picks another model, `--window` sets how much history to read (up to 90 plays), and `--json` prints the resolved tracks for a script. A suggestion the catalogue cannot find is reported instead of played, and the artist has to match, so a cover is not passed off as the recording that was meant.
 
-The key is the only part that costs money, and the default model is the cheapest one that is good at this: sixty track names in, ten out, well under a cent.
+It does not stop when the batch does. As the last track starts, `am recommend` asks for five more, and keeps asking: the queue runs until you quit. `--once` plays a single batch instead. The same extension works anywhere, so `am play "instant crush" --radio` and `am playlist "Late Night" --radio` turn any queue into one that keeps going, and `Ctrl-C` is still the way out.
+
+The key is the only part that costs money, and the default model is the cheapest one that is good at this: sixty track names in, ten out, well under a cent. A radio session pays that once per five tracks.
 
 ## Interface
 

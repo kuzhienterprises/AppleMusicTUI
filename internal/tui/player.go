@@ -54,6 +54,12 @@ const (
 	artMinContent      = 54
 	spectrumMinContent = 40
 
+	// radioAttempts is how many times a queue that cannot be extended is
+	// asked to extend itself before the music is allowed to stop. Each
+	// attempt is a model call, so a failure that repeats is not worth
+	// paying for twice more than this.
+	radioAttempts = 3
+
 	// queueWindow is how many tracks the queue panel shows around the one
 	// playing.
 	queueWindow = 7
@@ -86,6 +92,10 @@ type Searcher func(ctx context.Context, query string) ([]player.Track, error)
 // from, or that some tracks have none.
 type Lyricist func(ctx context.Context, track player.Track) (*lyrics.Doc, error)
 
+// Extend asks for more tracks when the queue is nearly out. It is given what
+// is already queued, and is expected to leave those out of the answer.
+type Extend func(ctx context.Context, queued []player.Track) ([]player.Track, error)
+
 // Options configure the player interface.
 type Options struct {
 	// Start brings the engine up once the interface is on screen.
@@ -96,6 +106,9 @@ type Options struct {
 	// Lyrics finds the words for a track. Without it the panel says so
 	// rather than opening empty.
 	Lyrics Lyricist
+	// Extend keeps the queue going once the last track is playing. Without
+	// it the queue ends where it ends, which is what most commands want.
+	Extend Extend
 	// Tracks is the queue to begin with.
 	Tracks []player.Track
 	// StopAfter quits once playback has run this long.
@@ -137,6 +150,13 @@ type (
 		err     error
 	}
 
+	// extendedMsg carries the next batch of the queue back from the
+	// recommendation goroutine. The engine already has them by then.
+	extendedMsg struct {
+		tracks []player.Track
+		err    error
+	}
+
 	// pulseMsg advances the animation on the status line.
 	pulseMsg struct{}
 )
@@ -171,6 +191,18 @@ type playerModel struct {
 
 	// lyricist fetches the words behind the lyrics panel.
 	lyricist Lyricist
+
+	// extender asks for more tracks when the queue runs low. It is nil when
+	// the queue is meant to end, which is most of the time.
+	extender Extend
+	// extending is true while a batch is on its way: the queue must not ask
+	// twice for the same thing.
+	extending bool
+	// extendFails counts consecutive failures. A queue that cannot be
+	// extended ends rather than asking again forever.
+	extendFails int
+	// radioErr is the last failure, shown instead of ending in silence.
+	radioErr error
 
 	// Lyrics panel state. The document is kept with the id of the track it
 	// belongs to, so a queue that moved on never shows the previous song's
@@ -340,6 +372,60 @@ func (m playerModel) enqueueCommand(track player.Track) tea.Cmd {
 	}
 }
 
+// radioCommand asks for the next batch of tracks and adds it to the queue.
+//
+// The batch is enqueued here rather than in the callback so the interface
+// keeps one place where the queue grows, and the play call afterwards covers
+// the case that matters most: the last track has already ended by the time the
+// answer arrives, and MusicKit does not resume on its own once it has stopped
+// at the end of a queue.
+func (m playerModel) radioCommand() tea.Cmd {
+	engine := m.engine
+	extend := m.extender
+	if engine == nil || extend == nil {
+		return nil
+	}
+
+	queued := append([]player.Track(nil), m.tracks...)
+	firstNew := len(m.tracks)
+	return func() tea.Msg {
+		// A model call plus a search per track: slower than the other
+		// background work here, but it runs while the last track is playing.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		tracks, err := extend(ctx, queued)
+		if err != nil {
+			return extendedMsg{err: err}
+		}
+		if len(tracks) == 0 {
+			return extendedMsg{err: errors.New("no more tracks came back")}
+		}
+		if err := engine.Enqueue(ctx, tracks); err != nil {
+			return extendedMsg{err: err}
+		}
+
+		if status, err := engine.Status(ctx); err == nil && status.Finished {
+			if err := engine.Play(ctx, firstNew); err != nil {
+				return extendedMsg{tracks: tracks, err: err}
+			}
+		}
+		return extendedMsg{tracks: tracks}
+	}
+}
+
+// shouldExtend reports whether the queue is close enough to its end to ask for
+// more: the last track of the queue is the one playing.
+func (m playerModel) shouldExtend() bool {
+	if m.extender == nil || m.extending || m.extendFails >= radioAttempts {
+		return false
+	}
+	if len(m.tracks) == 0 {
+		return false
+	}
+	return m.status.Index >= len(m.tracks)-1
+}
+
 // lyricsCommand fetches the words for the track on screen. It runs off the
 // update loop for the same reason the cover does: the catalogue is a network
 // away, and the progress bar must keep moving while it answers.
@@ -437,7 +523,11 @@ func (m playerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.started = true
 		}
 		if m.started && m.status.Finished {
-			return m, tea.Quit
+			// A queue that can still be extended is not over: wait for the
+			// next batch instead of quitting under it.
+			if !m.shouldExtend() && !m.extending {
+				return m, tea.Quit
+			}
 		}
 
 		// The cover on screen belongs to whichever track was playing a moment
@@ -457,7 +547,25 @@ func (m playerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				commands = append(commands, m.lyricsCommand())
 			}
 		}
+		// Ask for more as the last track of the queue starts, so the batch
+		// is ready before the music stops rather than after it.
+		if m.shouldExtend() {
+			m.extending = true
+			commands = append(commands, m.radioCommand())
+		}
 		return m, tea.Batch(commands...)
+
+	case extendedMsg:
+		m.extending = false
+		if msg.err != nil {
+			m.extendFails++
+			m.radioErr = msg.err
+			return m, nil
+		}
+		m.extendFails = 0
+		m.radioErr = nil
+		m.tracks = append(m.tracks, msg.tracks...)
+		return m, nil
 
 	case lyricsMsg:
 		// Words for a track that has since moved on are stale, and showing
@@ -1550,7 +1658,12 @@ func (m playerModel) noticeLine(content int) string {
 	}
 
 	if m.status.PreviewFallback {
-		return errorStyle.Render(clip("preview only — run `am login` to restore full-length playback", content))
+		return errorStyle.Render(clip("preview only - run `am login` to restore full-length playback", content))
+	}
+	// The queue could not be extended. Saying so is the difference between
+	// music that stopped and music that stopped for a reason.
+	if m.radioErr != nil {
+		return errorStyle.Render(clip("could not add more tracks: "+m.radioErr.Error(), content))
 	}
 	if m.monitor != nil && !m.monitor.Live() {
 		return helpStyle.Render("spectrum is a stand-in: system audio could not be read")
@@ -1824,6 +1937,7 @@ func Play(opts Options) error {
 		tracks:       opts.Tracks,
 		searcher:     opts.Search,
 		lyricist:     opts.Lyrics,
+		extender:     opts.Extend,
 		stopAfter:    opts.StopAfter,
 		monitor:      monitor,
 		bands:        make([]float64, visualizer.BandCount),

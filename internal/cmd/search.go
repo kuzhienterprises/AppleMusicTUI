@@ -73,7 +73,7 @@ func newSearchCommand() *cobra.Command {
 			if queueAll {
 				selected, startIndex = songs, picked
 			}
-			return playSongs(ctx, session, selected, startIndex, stopAfter)
+			return playSongs(ctx, session, selected, playOptions{startIndex: startIndex, stopAfter: stopAfter, radio: flagRadio})
 		},
 	}
 

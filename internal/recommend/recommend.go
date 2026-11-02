@@ -40,6 +40,10 @@ type Profile struct {
 	Artists   []Count
 	Genres    []Count
 	Playlists []string
+	// Queued is what the player already has lined up. It matters when the
+	// queue is being extended rather than filled: the model must not hand
+	// back a track that is about to play anyway.
+	Queued []string
 }
 
 // Searcher looks a suggestion up in the catalogue. It is passed in so the
@@ -342,6 +346,18 @@ func prompt(profile Profile, count int) (system, user string) {
 		lines = append(lines, "", "Playlists:")
 		for _, playlist := range profile.Playlists[:minInt(len(profile.Playlists), 20)] {
 			lines = append(lines, "- "+playlist)
+		}
+	}
+	if len(profile.Queued) > 0 {
+		// The tail, not the head: in a long session the tracks that just
+		// played are the ones most likely to be suggested again.
+		queued := profile.Queued
+		if len(queued) > 40 {
+			queued = queued[len(queued)-40:]
+		}
+		lines = append(lines, "", "Already queued, do not suggest:")
+		for _, track := range queued {
+			lines = append(lines, "- "+track)
 		}
 	}
 

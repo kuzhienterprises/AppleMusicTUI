@@ -40,7 +40,7 @@ searched by name and the best match wins. Pass --all to queue every match.`,
 				return err
 			}
 
-			return playSongs(ctx, session, songs, 0, stopAfter)
+			return playSongs(ctx, session, songs, playOptions{stopAfter: stopAfter, radio: flagRadio})
 		},
 	}
 
