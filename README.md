@@ -76,6 +76,7 @@ The real spectrum is Windows-only: WASAPI loopback captures system audio and an 
 ✓ mpv is installed — mpv <version>
 ✓ a Chromium browser is available — <browser path>
 ✓ interactive terminal detected — full-screen interface will be used
+✓ recommendations can ask a model - OpenAI gpt-6-luna
 ✓ spectrum can read the audio output — WASAPI loopback on the default output device
 
 ✓ Everything needed for search and playback is ready.
@@ -93,7 +94,7 @@ am playlist "Late Night"
 am status
 ```
 
-`login` opens a browser for you to sign in. The app commands are `doctor`, `login`, `status`, `search`, `playlists`, `playlist`, and `play`, plus `daemon` for the warm player described below.
+`login` opens a browser for you to sign in. The app commands are `doctor`, `login`, `status`, `search`, `playlists`, `playlist`, `play`, `recommend` and `config`, plus `daemon` for the warm player described below.
 
 Global flags: `--plain` never takes over the terminal, `--engine auto|full|preview` chooses how playback runs, `--headless` runs the playback browser with no window at all instead of parking one off-screen, `--no-daemon` never keeps a player warm between commands, `--storefront us` pins a storefront, `--verbose` adds diagnostic detail, and `--json` prints machine-readable output on `search`, `playlists` and `status`.
 
@@ -140,6 +141,22 @@ browser boot: process 3.8s, page target 100ms, MusicKit 5.4s, queue 2.2s, first 
 
 The lyrics are Apple's own, timed to the recording, and they come from the catalogue. A track Apple has no lyrics for says so rather than showing an empty panel, and that is the usual answer for instrumentals. Instrumental intros have no line to highlight, so the first line waits at the top until it is sung.
 
+## Recommendations
+
+`am recommend` reads your recently played history from Apple Music, asks an OpenAI model for tracks you have not just played, looks each one up in the catalogue, and plays the ones that exist.
+
+The history is Apple's rather than this terminal's: it is the same list your phone and your laptop contribute to, so the first run already has something to work with. The names of your playlists go with it, because "Late Night" and "Gym" say more per word than another row of track titles. That summary is all the model sees, and it sees it only when you give it a key.
+
+```sh
+export OPENAI_API_KEY=sk-...     # or: am config set openaiKey <key>
+am recommend                     # ask, look up, play
+am recommend --count 5 --print   # just the list, with a reason for each
+```
+
+`--model` picks another model, `--window` sets how much history to read (up to 90 plays), and `--json` prints the resolved tracks for a script. A suggestion the catalogue cannot find is reported instead of played, and the artist has to match, so a cover is not passed off as the recording that was meant.
+
+The key is the only part that costs money, and the default model is the cheapest one that is good at this: sixty track names in, ten out, well under a cent.
+
 ## Interface
 
 ```
@@ -176,6 +193,7 @@ The lyrics are Apple's own, timed to the recording, and they come from the catal
 | macOS refuses to run `am` | Only archives unzipped through a browser carry the quarantine flag: `xattr -d com.apple.quarantine ~/.local/bin/am`. |
 | Full-length playback falls back to previews | Sign in with `am login`; full-length playback requires an active session. |
 | Spectrum unavailable | Real spectrum capture is supported on Windows only. |
+| `am recommend` says there is no OpenAI key | Set `OPENAI_API_KEY`, or run `am config set openaiKey <key>`. |
 
 ## How it works
 
@@ -183,7 +201,7 @@ A Chromium page is started off-screen and never shown; `--headless` skips the wi
 
 ## Legal
 
-For personal use; not affiliated with or endorsed by Apple. Full-length playback uses Apple's own web player; nothing here decrypts audio or circumvents DRM.
+For personal use; not affiliated with or endorsed by Apple. Full-length playback uses Apple's own web player; nothing here decrypts audio or circumvents DRM. Recommendations send a summary of your listening history to OpenAI, and only when you configure a key for them.
 
 ## License
 

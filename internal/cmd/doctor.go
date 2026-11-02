@@ -134,6 +134,23 @@ func runChecks(ctx context.Context) []checkResult {
 		})
 	}
 
+	// Recommendations. They are an extra, so a missing key is reported and
+	// never fails the run: search and playback do not need one.
+	if key := openAIKey(); key == "" {
+		results = append(results, checkResult{
+			"recommendations can ask a model", false,
+			"no OpenAI key - set OPENAI_API_KEY, or run `am config set openaiKey`", false,
+		})
+	} else {
+		model := strings.TrimSpace(cfg.OpenAIModel)
+		if model == "" {
+			model = defaultModel
+		}
+		results = append(results, checkResult{
+			"recommendations can ask a model", true, "OpenAI " + model, false,
+		})
+	}
+
 	// Spectrum. A failure here is cosmetic, so it never fails the run: the
 	// player falls back to a labelled animation.
 	if monitor, err := visualizer.StartLoopback(); err != nil {

@@ -100,8 +100,10 @@ sessions fall back to Apple's 30 second preview clips, which play through mpv.`,
 		newDoctorCommand(),
 		newSearchCommand(),
 		newPlayCommand(),
+		newRecommendCommand(),
 		newPlaylistsCommand(),
 		newPlaylistCommand(),
+		newConfigCommand(),
 		newDaemonCommand(),
 	)
 	return root

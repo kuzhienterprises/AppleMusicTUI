@@ -24,8 +24,14 @@ type Config struct {
 	// Storefront is the two-letter country code, e.g. "us" or "in".
 	Storefront string `json:"storefront,omitempty"`
 	// MpvPath overrides autodetection of the mpv binary.
-	MpvPath   string `json:"mpvPath,omitempty"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	MpvPath string `json:"mpvPath,omitempty"`
+	// OpenAIKey is the key recommendations are bought with. It is a secret,
+	// so it is masked wherever settings are shown, and the environment
+	// variable OPENAI_API_KEY wins over it when both are set.
+	OpenAIKey string `json:"openaiKey,omitempty"`
+	// OpenAIModel overrides the model recommendations use.
+	OpenAIModel string `json:"openaiModel,omitempty"`
+	UpdatedAt   string `json:"updatedAt,omitempty"`
 }
 
 func baseDir() string {
@@ -95,7 +101,7 @@ func Update(mutate func(*Config)) (Config, error) {
 }
 
 // Clear removes the named fields. Known names are devToken, musicUserToken,
-// storefront and mpvPath.
+// storefront, mpvPath, openaiKey and openaiModel.
 func Clear(keys ...string) error {
 	cfg := Load()
 	for _, key := range keys {
@@ -108,6 +114,10 @@ func Clear(keys ...string) error {
 			cfg.Storefront = ""
 		case "mpvPath":
 			cfg.MpvPath = ""
+		case "openaiKey":
+			cfg.OpenAIKey = ""
+		case "openaiModel":
+			cfg.OpenAIModel = ""
 		}
 	}
 	return Save(cfg)

@@ -18,6 +18,11 @@ type Song struct {
 	URL        string
 	CatalogID  string
 	ISRC       string
+	// Genres are Apple's genre names for the track ("Pop", "Indie Rock").
+	// They are empty for library entries that have never been looked up in
+	// the catalogue, which is why the recommender treats them as a bonus
+	// rather than a requirement.
+	Genres []string
 }
 
 // Playable reports whether the track has an audio source we can hand to the

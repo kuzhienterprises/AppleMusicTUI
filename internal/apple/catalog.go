@@ -25,8 +25,9 @@ type songAttributes struct {
 	Previews []struct {
 		URL string `json:"url"`
 	} `json:"previews"`
-	URL        string `json:"url"`
-	ISRC       string `json:"isrc"`
+	URL        string   `json:"url"`
+	ISRC       string   `json:"isrc"`
+	GenreNames []string `json:"genreNames"`
 	PlayParams *struct {
 		ID        string `json:"id"`
 		CatalogID string `json:"catalogId"`
@@ -45,6 +46,7 @@ func (r songResource) toSong() Song {
 	song.DurationMs = a.DurationInMillis
 	song.URL = a.URL
 	song.ISRC = a.ISRC
+	song.Genres = a.GenreNames
 	if a.Artwork != nil {
 		song.Artwork = a.Artwork.URL
 	}
