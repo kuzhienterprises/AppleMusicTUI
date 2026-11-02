@@ -148,10 +148,12 @@ The lyrics are Apple's own, timed to the recording, and they come from the catal
 The history is Apple's rather than this terminal's: it is the same list your phone and your laptop contribute to, so the first run already has something to work with. The names of your playlists go with it, because "Late Night" and "Gym" say more per word than another row of track titles. That summary is all the model sees, and it sees it only when you give it a key.
 
 ```sh
-export OPENAI_API_KEY=sk-...     # or: am config set openaiKey <key>
+am config env                    # create the env file, then put OPENAI_API_KEY=sk-... in it
 am recommend                     # ask, look up, play
 am recommend --count 5 --print   # just the list, with a reason for each
 ```
+
+A key can live in three places, and the first one that is set wins: `OPENAI_API_KEY` in the environment, the env file `am config env` creates, and the saved settings (`am config set openaiKey`). The env file is a plain `KEY=VALUE` file, owner-only, read before every command, and never sent anywhere except to the model it names.
 
 `--model` picks another model, `--window` sets how much history to read (up to 90 plays), and `--json` prints the resolved tracks for a script. A suggestion the catalogue cannot find is reported instead of played, and the artist has to match, so a cover is not passed off as the recording that was meant.
 

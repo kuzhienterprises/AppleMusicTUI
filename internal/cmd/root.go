@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -77,6 +78,20 @@ sessions fall back to Apple's 30 second preview clips, which play through mpv.`,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			ui.SetVerbose(flagVerbose)
+
+			// The env file is read after the flags are set, so a malformed
+			// line can be reported under --verbose, and after the first
+			// command has had a chance to create it.
+			applied, problems, err := config.LoadEnv(config.EnvFile)
+			switch {
+			case err != nil:
+				ui.Debug("could not read %s: %v", config.EnvFile, err)
+			case len(problems) > 0:
+				ui.Warn("%s: %s", config.EnvFile, strings.Join(problems, "; "))
+			case applied > 0:
+				ui.Debug("read %d variable(s) from %s", applied, config.EnvFile)
+			}
+
 			if flagStorefront != "" {
 				if _, err := config.Update(func(c *config.Config) { c.Storefront = flagStorefront }); err != nil {
 					return err

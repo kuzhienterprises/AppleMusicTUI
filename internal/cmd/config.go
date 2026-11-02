@@ -64,21 +64,54 @@ func newConfigCommand() *cobra.Command {
 		Short: "Show or change the saved settings",
 		Long: `Shows the saved settings, with the secrets masked to whether they are set.
 
-The OpenAI key can also be given as OPENAI_API_KEY, which is the better place
-for it: an environment variable does not land in this file, and it is not in
-your shell history either.`,
+The OpenAI key can also live in the env file, which is a plain KEY=VALUE file
+read before every command: see ` + "`am config env`" + `. A variable already set
+in the environment wins over both.`,
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			cfg := config.Load()
 			for _, item := range settings {
 				ui.Info("%-13s %s", item.name, describe(item, item.read(cfg)))
 			}
+			ui.Info("%-13s %s", "env file", config.EnvFile+" ("+config.EnvFileStatus()+")")
 			return nil
 		},
 	}
 
-	cmd.AddCommand(newConfigSetCommand(), newConfigUnsetCommand())
+	cmd.AddCommand(newConfigSetCommand(), newConfigUnsetCommand(), newConfigEnvCommand())
 	return cmd
+}
+
+// newConfigEnvCommand creates the env file. It is a separate command rather
+// than something `am config` does on its own, because writing a file in the
+// settings directory is not something a listing should have as a side effect.
+func newConfigEnvCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "env",
+		Short: "Create the env file used for keys",
+		Long: `Creates the env file if it is not there yet, with a commented example in it.
+
+Every am command reads it before it starts, so a key put there works without
+being exported in each shell. A variable already set in the environment wins
+over the file, and the file is never uploaded anywhere: it is read on this
+machine, for this process.
+
+The file is not overwritten if it already exists.`,
+		Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			path, created, err := config.WriteEnvTemplate()
+			if err != nil {
+				return err
+			}
+			if created {
+				ui.OK("Created %s.", path)
+				ui.Info("Put a key in it, e.g. OPENAI_API_KEY=sk-...")
+				return nil
+			}
+			ui.OK("%s already exists.", path)
+			return nil
+		},
+	}
 }
 
 func newConfigSetCommand() *cobra.Command {
@@ -92,8 +125,9 @@ func newConfigSetCommand() *cobra.Command {
   openaiModel   model recommendations use, e.g. gpt-6-luna
   mpvPath       mpv binary to use for previews
 
-Setting the OpenAI key this way puts it in your shell history. Prefer
-OPENAI_API_KEY in your environment unless you have a reason not to.`,
+Setting the OpenAI key this way puts it in your shell history. The env file
+(` + "`am config env`" + `) holds it just as well, and keeps it out of both the
+shell and the saved settings.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			item, ok := lookupSetting(args[0])

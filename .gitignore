@@ -9,3 +9,6 @@
 /am.exe
 
 .DS_Store
+
+# Local secrets, never committed
+.env
