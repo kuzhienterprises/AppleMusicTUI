@@ -34,11 +34,9 @@ var (
 	keyStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	labelStyle = lipgloss.NewStyle().Foreground(faint)
 
-	// frameStyle turns the card into a window rather than a floating block.
-	frameStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ghost).
-			Padding(1, 2)
+	// frameEdgeStyle colours the card's border, which is drawn by hand: see
+	// playerModel.frame.
+	frameEdgeStyle = lipgloss.NewStyle().Foreground(ghost)
 
 	cursorStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	pickerTitle  = lipgloss.NewStyle().Bold(true).Foreground(accent)
@@ -174,14 +172,14 @@ func clip(text string, width int) string {
 	if width <= 1 {
 		return text
 	}
-	if lipgloss.Width(text) <= width {
+	if cellWidth(text) <= width {
 		return text
 	}
 
 	runes := []rune(text)
 	for len(runes) > 0 {
 		runes = runes[:len(runes)-1]
-		if lipgloss.Width(string(runes)) <= width-1 {
+		if cellWidth(string(runes)) <= width-1 {
 			return string(runes) + "…"
 		}
 	}
@@ -190,7 +188,7 @@ func clip(text string, width int) string {
 
 // padRight pads text out to a column width, for the help panel's two columns.
 func padRight(text string, width int) string {
-	padding := width - lipgloss.Width(text)
+	padding := width - cellWidth(text)
 	if padding <= 0 {
 		return text
 	}

@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rivo/uniseg"
 
 	"github.com/kuzhienterprises/AppleMusicTUI/internal/artwork"
@@ -53,6 +54,10 @@ const (
 	// content widths.
 	artMinContent      = 54
 	spectrumMinContent = 40
+
+	// framePadding is the blank space the frame leaves on either side of its
+	// content, in cells.
+	framePadding = 2
 
 	// radioAttempts is how many times a queue that cannot be extended is
 	// asked to extend itself before the music is allowed to stop. Each
@@ -906,11 +911,49 @@ func fitsHeight(block string, height int) bool {
 
 // centre drops the card in the middle of the window, which is what keeps the
 // player from hugging the top-left corner.
+//
+// The padding is worked out here rather than by lipgloss.Place for the same
+// reason the frame is drawn here: lipgloss pads to the window width by its own
+// measure, and a line that it thinks is 120 cells wide can be 127 by the
+// terminal's, which wraps and leaves the previous frame behind.
 func (m playerModel) centre(card string) string {
 	if m.width <= 0 || m.height <= 0 {
 		return card
 	}
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, card)
+	return placeIn(card, m.width, m.height)
+}
+
+// placeIn centres a block in a window, measuring with cellWidth.
+//
+// The padding is worked out here rather than by lipgloss.Place because
+// lipgloss pads to the window width by its own measure, and a line it thinks
+// is 120 cells wide can be 127 by the terminal's: the terminal wraps it and
+// leaves the previous frame behind on every repaint.
+func placeIn(block string, width, height int) string {
+	lines := strings.Split(block, "\n")
+	blockWidth := 0
+	for _, line := range lines {
+		blockWidth = maxInt(blockWidth, cellWidth(line))
+	}
+
+	left := maxInt((width-blockWidth)/2, 0)
+	top := maxInt((height-len(lines))/2, 0)
+
+	out := make([]string, 0, height)
+	for i := 0; i < top; i++ {
+		out = append(out, "")
+	}
+	padding := strings.Repeat(" ", left)
+	for _, line := range lines {
+		out = append(out, padRight(padding+line, width))
+	}
+	// The area below the card is cleared the same way the area beside it is:
+	// a shorter frame that only pads sideways leaves the previous frame's
+	// bottom rows on screen.
+	for len(out) < height {
+		out = append(out, "")
+	}
+	return strings.Join(out[:minInt(len(out), height)], "\n")
 }
 
 func (m playerModel) card(content int, l layout) string {
@@ -985,8 +1028,55 @@ func (m playerModel) helpCard(content int, l layout) string {
 }
 
 // frame draws the border and padding around prepared content lines.
+//
+// The border is drawn here rather than handed to lipgloss because lipgloss
+// measures text with runewidth, which puts a Tamil or Telugu lyric about 15%
+// narrower than the terminal draws it. The border would be placed inside the
+// words, and the terminal, laying the line out its own way, would wrap it and
+// leave the previous frame behind on every repaint. One measure, cellWidth(),
+// builds the whole card.
 func (m playerModel) frame(lines []string, content int) string {
-	return frameStyle.Render(strings.Join(padLines(lines, content), "\n"))
+	border := lipgloss.RoundedBorder()
+	inner := content + framePadding*2
+	blank := frameEdge(border.Left) + strings.Repeat(" ", inner) + frameEdge(border.Right)
+
+	out := make([]string, 0, len(lines)+4)
+	out = append(out, frameEdge(border.TopLeft+strings.Repeat(border.Top, inner)+border.TopRight))
+	out = append(out, blank)
+	for _, line := range lines {
+		out = append(out, frameEdge(border.Left+"  ")+fitLine(line, content)+frameEdge("  "+border.Right))
+	}
+	out = append(out, blank)
+	out = append(out, frameEdge(border.BottomLeft+strings.Repeat(border.Bottom, inner)+border.BottomRight))
+	return strings.Join(out, "\n")
+}
+
+// frameEdge colours the border, which is the one part of the card that is
+// always plain text.
+func frameEdge(text string) string {
+	return frameEdgeStyle.Render(text)
+}
+
+// fitLine pads or cuts a line to exactly width cells, measured by cellWidth(), so
+// every row of the card ends at the same column.
+func fitLine(line string, width int) string {
+	if slack := width - cellWidth(line); slack > 0 {
+		return line + strings.Repeat(" ", slack)
+	}
+	if cellWidth(line) == width {
+		return line
+	}
+
+	// Too wide. ansi.Truncate measures with the table that under-counts these
+	// lines, so its answer is checked again rather than trusted; if it still
+	// does not fit, the text is cut by grapheme cluster and loses its styling,
+	// which is better than a border that moves.
+	cut := ansi.Truncate(line, width, "")
+	if fitted := cellWidth(cut); fitted <= width {
+		return cut + strings.Repeat(" ", width-fitted)
+	}
+	chunks := splitByWidth(ansi.Strip(line), width)
+	return chunks[0] + strings.Repeat(" ", width-displayWidth(chunks[0]))
 }
 
 // headerLine is the status strip: the wordmark on the left and the things
@@ -1017,14 +1107,14 @@ func (m playerModel) headerLine(width int) string {
 // middle item tucked against the right if there is room. It reports whether
 // the arrangement fits at all.
 func spread(left, middle, right string, width int) (string, bool) {
-	leftWidth, rightWidth := lipgloss.Width(left), lipgloss.Width(right)
+	leftWidth, rightWidth := cellWidth(left), cellWidth(right)
 	if leftWidth+1+rightWidth > width {
 		return "", false
 	}
 
-	if middle != "" && leftWidth+1+lipgloss.Width(middle)+3+rightWidth <= width {
+	if middle != "" && leftWidth+1+cellWidth(middle)+3+rightWidth <= width {
 		trailing := middle + strings.Repeat(" ", 3) + right
-		return left + strings.Repeat(" ", width-leftWidth-lipgloss.Width(trailing)) + trailing, true
+		return left + strings.Repeat(" ", width-leftWidth-cellWidth(trailing)) + trailing, true
 	}
 	return left + strings.Repeat(" ", width-leftWidth-rightWidth) + right, true
 }
@@ -1147,10 +1237,10 @@ func (m playerModel) queryLine(width int) string {
 	if m.search.editing {
 		query += "▌"
 	}
-	query = clip(query, maxInt(width-lipgloss.Width(prompt), 1))
+	query = clip(query, maxInt(width-cellWidth(prompt), 1))
 
 	field := prompt + valueStyle.Render(query)
-	used := lipgloss.Width(prompt) + lipgloss.Width(query)
+	used := cellWidth(prompt) + cellWidth(query)
 
 	hint := ""
 	switch {
@@ -1166,8 +1256,8 @@ func (m playerModel) queryLine(width int) string {
 		hint = helpStyle.Render(itoa(len(m.search.results)) + " results")
 	}
 
-	if hint != "" && used+2+lipgloss.Width(hint) <= width {
-		return field + strings.Repeat(" ", width-used-lipgloss.Width(hint)) + hint
+	if hint != "" && used+2+cellWidth(hint) <= width {
+		return field + strings.Repeat(" ", width-used-cellWidth(hint)) + hint
 	}
 	return field
 }
@@ -1217,9 +1307,9 @@ func (m playerModel) resultLine(index int, track player.Track, width int) string
 	}
 
 	line := mark + tick + style.Render(label)
-	if slack := width - (4 + lipgloss.Width(label)); slack >= 16 && track.Album != "" {
+	if slack := width - (4 + cellWidth(label)); slack >= 16 && track.Album != "" {
 		album := clip(track.Album, slack-2)
-		line += strings.Repeat(" ", slack-lipgloss.Width(album)) + albumStyle.Render(album)
+		line += strings.Repeat(" ", slack-cellWidth(album)) + albumStyle.Render(album)
 	}
 	return line
 }
@@ -1242,7 +1332,7 @@ func (m playerModel) metaLines(width int) []string {
 	// that already fits is left exactly as Apple wrote it. "Earth, Wind &
 	// Fire" is one band, and splitting it on the commas would say "Earth +2".
 	artist := track.Artist
-	if lipgloss.Width(artist) > width {
+	if cellWidth(artist) > width {
 		artist = summarizeArtists(artist)
 	}
 
@@ -1280,7 +1370,7 @@ func (m playerModel) lyricsLines(width, rows int) []string {
 
 	track := m.currentTrack()
 	artist := track.Artist
-	if lipgloss.Width(artist) > width {
+	if cellWidth(artist) > width {
 		artist = summarizeArtists(artist)
 	}
 	lines := []string{
@@ -1439,6 +1529,16 @@ func displayWidth(text string) int {
 	return uniseg.StringWidth(text)
 }
 
+// cellWidth measures a line the way the terminal lays it out: grapheme
+// clusters, with ANSI escapes ignored. It is the measure the whole card is
+// built with, and it is deliberately not lipgloss.Width, which counts runes
+// with runewidth: a Tamil lyric comes out about 15% narrower there than the
+// terminal draws it, so the frame would be placed inside the words and the
+// wrapped line would leave the previous frame on screen.
+func cellWidth(text string) int {
+	return uniseg.StringWidth(ansi.Strip(text))
+}
+
 // centreIn pads text to the width of the column. Centring is what makes the
 // words read as a block of lyrics rather than as ragged metadata.
 func centreIn(text string, width int) string {
@@ -1536,7 +1636,7 @@ func (m playerModel) progressLine(content int) string {
 	total := clock(duration)
 
 	// icon + 2 + elapsed + 2 + bar + 2 + total
-	barWidth := content - lipgloss.Width(icon) - 4 - lipgloss.Width(elapsed) - 2 - lipgloss.Width(total)
+	barWidth := content - cellWidth(icon) - 4 - cellWidth(elapsed) - 2 - cellWidth(total)
 	barWidth = maxInt(barWidth, 8)
 
 	return style.Render(icon) + "  " +
@@ -1575,11 +1675,11 @@ func (m playerModel) upNextLine(content int) string {
 
 	if index := m.index(); index+1 < len(m.tracks) {
 		prefix := label + dimStyle.Render("›") + "  "
-		room := maxInt(content-lipgloss.Width(prefix), 1)
+		room := maxInt(content-cellWidth(prefix), 1)
 		return prefix + valueStyle.Render(clip(m.tracks[index+1].Label(), room))
 	}
 
-	room := maxInt(content-lipgloss.Width(label), 1)
+	room := maxInt(content-cellWidth(label), 1)
 	return label + helpStyle.Render(clip("nothing yet — / adds more", room))
 }
 
@@ -1651,7 +1751,7 @@ func (m playerModel) noticeLine(content int) string {
 		// narrowest card: a still picture of a working app is what a hang looks
 		// like, and this is the one moment where the two cannot be told apart.
 		head := m.accentStyle().Render(m.pulseFrame()) + "  " + valueStyle.Render("Initializing")
-		if room := content - lipgloss.Width(head); room > 4 {
+		if room := content - cellWidth(head); room > 4 {
 			return head + helpStyle.Render(clip(" — booting a browser", room))
 		}
 		return head
@@ -1687,7 +1787,7 @@ func (m playerModel) stateLine(content int) string {
 	case m.started:
 		// The dots are the thing being measured: "Playing" is fixed, and on
 		// anything wider than the narrowest card there is room for all three.
-		dots := clampInt(content-lipgloss.Width("Playing"), 1, m.pulse%3+1)
+		dots := clampInt(content-cellWidth("Playing"), 1, m.pulse%3+1)
 		return valueStyle.Render("Playing") + m.accentStyle().Render(strings.Repeat(".", dots))
 	}
 	return ""
@@ -1776,7 +1876,7 @@ func wrapHints(hints []string, width int) []string {
 				if k > start-1 {
 					lineWidth += separator
 				}
-				lineWidth += lipgloss.Width(hints[k])
+				lineWidth += cellWidth(hints[k])
 			}
 
 			candidate := cost[start-1]
@@ -1815,7 +1915,7 @@ func reverseStrings(items []string) {
 func padLines(lines []string, width int) []string {
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		padding := width - lipgloss.Width(line)
+		padding := width - cellWidth(line)
 		if padding <= 0 {
 			out[i] = line
 			continue

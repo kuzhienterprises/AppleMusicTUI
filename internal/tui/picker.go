@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Item is one row in a picker list. Index refers to the position of the
@@ -106,7 +105,7 @@ func (m pickerModel) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return body
 	}
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+	return placeIn(body, m.width, m.height)
 }
 
 // Choose shows an interactive list and returns the chosen item, or nil when

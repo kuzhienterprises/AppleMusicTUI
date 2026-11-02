@@ -1473,3 +1473,48 @@ func findExtended(t *testing.T, msgs []tea.Msg) extendedMsg {
 	t.Fatal("the batch produced no extension")
 	return extendedMsg{}
 }
+
+// A Tamil or Telugu lyric measures wider on the terminal than lipgloss thinks
+// (21 cells against 20 for one line, 48 against 41 for another). The card used
+// to be measured with lipgloss, so the right border was placed inside the
+// words and the terminal wrapped the line, which left the previous frame on
+// screen on every repaint. Every row of the card now has to end at the same
+// column, by the measure the terminal uses.
+func TestTamilLyricsKeepTheCardSquare(t *testing.T) {
+	doc := &lyrics.Doc{Synced: true, Lines: []lyrics.Line{
+		{Start: 0, End: 3 * time.Second, Text: "ஹே, இங்க நான் தான் king'uh"},
+		{Start: 3 * time.Second, End: 7 * time.Second, Text: "நான் வெச்சதுதான் rules'uh"},
+		{Start: 7 * time.Second, End: 12 * time.Second, Text: "அந்த rules'ah நான் இஷ்டத்துக்கு அப்பப்போ மாத்திட்டே இருப்பேன்"},
+	}}
+
+	for _, size := range []struct{ width, height int }{{120, 40}, {100, 30}, {80, 24}} {
+		model := testModel(size.width, size.height)
+		model.showLyrics = true
+		model.lyrics = doc
+		model.status.Position = 4
+
+		lines := strings.Split(model.View(), "\n")
+		want := size.width
+
+		for i, line := range lines {
+			if got := cellWidth(line); got != 0 && got != want {
+				t.Errorf("%dx%d line %d is %d cells, want %d", size.width, size.height, i, got, want)
+			}
+			if got := cellWidth(line); got > size.width {
+				t.Errorf("%dx%d line %d is %d cells, past the window: the terminal would wrap it",
+					size.width, size.height, i, got)
+			}
+		}
+
+		// The border has to be the last cell of every row it appears on: a
+		// line drawn wider than it was measured pushes the border inwards.
+		for i, line := range lines {
+			if !strings.Contains(line, "│") {
+				continue
+			}
+			if trimmed := strings.TrimRight(line, " "); !strings.HasSuffix(trimmed, "│") {
+				t.Errorf("%dx%d line %d has its border inside the text: %q", size.width, size.height, i, trimmed)
+			}
+		}
+	}
+}
