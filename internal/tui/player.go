@@ -770,7 +770,19 @@ func (m playerModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "pgup", "pgdown", "home", "end", "tab":
+	case "home":
+		if !m.search.editing {
+			m.search.choice = 0
+		}
+		return m, nil
+
+	case "end":
+		if !m.search.editing {
+			m.search.choice = maxInt(len(m.search.results)-1, 0)
+		}
+		return m, nil
+
+	case "pgup", "pgdown", "tab":
 		return m, nil
 	}
 
@@ -1262,26 +1274,76 @@ func (m playerModel) queryLine(width int) string {
 	return field
 }
 
-// resultLines draws as many results as the column has room for. Anything left
-// over is counted rather than silently dropped, so a short list is never
-// mistaken for the whole answer.
+// resultLines draws the slice of results the column has room for, scrolled so
+// the highlighted one is always on screen. Anything left over is counted
+// rather than silently dropped, so a short list is never mistaken for the
+// whole answer.
 func (m playerModel) resultLines(width, budget int) []string {
-	if len(m.search.results) == 0 || budget <= 0 {
-		if len(m.search.results) == 0 && !m.search.editing && !m.search.searching && m.search.err == nil {
+	if budget <= 0 {
+		return nil
+	}
+	if len(m.search.results) == 0 {
+		if !m.search.editing && !m.search.searching && m.search.err == nil {
 			return []string{helpStyle.Render("Nothing found")}
 		}
 		return nil
 	}
 
+	total := len(m.search.results)
+	visible := budget
+	if total > budget {
+		// The last row belongs to the count, so the list scrolls instead of
+		// growing a tail the arrow keys cannot reach.
+		visible = budget - 1
+	}
+	if visible <= 0 {
+		return []string{m.resultCount(total, 0, 0)}
+	}
+
+	first := scrollStart(m.search.choice, total, visible)
+	last := minInt(first+visible, total)
+
 	lines := make([]string, 0, budget)
-	for i, track := range m.search.results {
-		if len(lines) == budget {
-			lines[len(lines)-1] = helpStyle.Render("… " + itoa(len(m.search.results)-len(lines)+1) + " more")
-			break
-		}
-		lines = append(lines, m.resultLine(i, track, width))
+	for i := first; i < last; i++ {
+		lines = append(lines, m.resultLine(i, m.search.results[i], width))
+	}
+	if last-first < total {
+		lines = append(lines, m.resultCount(total, first, last))
 	}
 	return lines
+}
+
+// scrollStart is the first result to draw: a window of size rows that holds
+// the highlight and stays inside the list.
+func scrollStart(choice, total, size int) int {
+	if size <= 0 || total <= size {
+		return 0
+	}
+	first := choice - size/2
+	if first < 0 {
+		first = 0
+	}
+	if first > total-size {
+		first = total - size
+	}
+	return first
+}
+
+// resultCount says how much of the list is off screen, and which way.
+func (m playerModel) resultCount(total, first, last int) string {
+	above := first
+	below := total - last
+
+	var text string
+	switch {
+	case above > 0 && below > 0:
+		text = "… " + itoa(above) + " above, " + itoa(below) + " below"
+	case above > 0:
+		text = "… " + itoa(above) + " above"
+	default:
+		text = "… " + itoa(below) + " more"
+	}
+	return helpStyle.Render(text)
 }
 
 // resultLine is one result: the selection arrow, a tick for what has already

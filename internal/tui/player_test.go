@@ -779,6 +779,59 @@ func TestSearchPanelDoesNotResizeTheCard(t *testing.T) {
 	}
 }
 
+// A search can come back with more than the panel has rows for. The window
+// has to move with the highlight: a list pinned to the first few results left
+// the arrow keys walking through entries that were never on screen, with no
+// way to tell which one Enter was about to queue.
+func TestSearchListScrollsWithTheHighlight(t *testing.T) {
+	const total = 24
+	results := make([]player.Track, total)
+	for i := range results {
+		results[i] = player.Track{
+			ID:     itoa(i),
+			Title:  fmt.Sprintf("Track %02d", i+1),
+			Artist: "Artist",
+		}
+	}
+
+	model := testModel(100, 30)
+	model.search = searchState{
+		open:    true,
+		query:   "track",
+		results: results,
+		queued:  make([]bool, total),
+	}
+
+	for _, choice := range []int{0, 1, 11, total - 1} {
+		model.search.choice = choice
+		want := fmt.Sprintf("Track %02d", choice+1)
+
+		var selected string
+		for _, line := range viewLines(model.View()) {
+			if strings.Contains(line, "▸") {
+				selected = line
+			}
+		}
+		if selected == "" {
+			t.Fatalf("choice %d: no highlighted row on screen", choice)
+		}
+		if !strings.Contains(selected, want) {
+			t.Errorf("choice %d: highlighted %q, want %q", choice, selected, want)
+		}
+	}
+
+	// The count says which side the rest of the list is on, so the panel never
+	// looks like a complete answer it is not.
+	model.search.choice = 0
+	if view := model.View(); !strings.Contains(view, "more") {
+		t.Error("expected the results below the window to be counted")
+	}
+	model.search.choice = total - 1
+	if view := model.View(); !strings.Contains(view, "above") {
+		t.Error("expected the results above the window to be counted")
+	}
+}
+
 // A result set that arrives after the query moved on belongs to a search the
 // user has already replaced.
 func TestStaleSearchResultsAreDropped(t *testing.T) {
